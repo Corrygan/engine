@@ -1,0 +1,23 @@
+# ninja log v7
+5	14	8037631490117151	clean	4657a475079c8ec1
+21	356	8037631490473494	CMakeFiles/Engine.dir/Renderer/Mesh.cpp.obj	9dddb4ee9dae04ef
+23	377	8037631490493477	CMakeFiles/Engine.dir/Renderer/Grid.cpp.obj	d6725127b4c9c8b0
+32	381	8037631490588909	CMakeFiles/Engine.dir/glad/src/gl.c.obj	71943ff6abbaa14b
+25	622	8037631490518587	CMakeFiles/Engine.dir/Renderer/EditorCamera.cpp.obj	e178704def3a4daa
+17	706	8037631490433416	CMakeFiles/Engine.dir/Renderer/Framebuffer.cpp.obj	2bab9cebca8b94bd
+15	750	8037631490417184	CMakeFiles/Engine.dir/Assets/SceneSerializer.cpp.obj	e122ab98615f2008
+27	756	8037631490543697	CMakeFiles/Engine.dir/Renderer/Picking.cpp.obj	d8523837644f1c23
+12	759	8037631490387208	CMakeFiles/Engine.dir/Assets/MetaFile.cpp.obj	e460dc68fe465500
+29	770	8037631490563753	CMakeFiles/Engine.dir/Renderer/SceneRenderer.cpp.obj	9bc85ccc84202218
+10	835	8037631490362072	CMakeFiles/Engine.dir/Core/Guid.cpp.obj	d9fc034939e4028f
+19	857	8037631490453481	CMakeFiles/Engine.dir/Renderer/Shader.cpp.obj	573387bc56e45517
+7	862	8037631490332080	CMakeFiles/Engine.dir/main.cpp.obj	8904e0e2ce52b385
+378	1001	8037631494043084	CMakeFiles/Engine.dir/imgui/imgui_draw.cpp.obj	b03264a3e6efdfe0
+381	1080	8037631494078215	CMakeFiles/Engine.dir/imgui/imgui_widgets.cpp.obj	3bdefbcb7aae16d
+13	1082	8037631490397199	CMakeFiles/Engine.dir/Assets/AssetDatabase.cpp.obj	f193e5d90f1d17c8
+624	1086	8037631496499925	CMakeFiles/Engine.dir/imgui/imgui_tables.cpp.obj	fefce1a12c02db4b
+751	1104	8037631497781076	CMakeFiles/Engine.dir/imgui/backends/imgui_impl_opengl3.cpp.obj	d7baf15cfe283e5c
+707	1233	8037631497335932	CMakeFiles/Engine.dir/imgui/backends/imgui_impl_glfw.cpp.obj	4e487a510af4be49
+9	1294	8037631490362072	CMakeFiles/Engine.dir/UI/EditorUI.cpp.obj	9144f1777545341a
+357	1344	8037631493837340	CMakeFiles/Engine.dir/imgui/imgui.cpp.obj	22499fa7b38a1fdf
+1345	1635	8037631503716516	Engine.exe	f655988e4ef19cb5
