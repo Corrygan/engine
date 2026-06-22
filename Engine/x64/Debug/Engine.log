@@ -1,9 +1,0 @@
-﻿  imgui_impl_glfw.cpp
-E:\Engine\imgui\backends\imgui_impl_glfw.cpp(102,10): error C1083: Не удается открыть файл включение: imgui.h: No such file or directory,
-  imgui_impl_opengl3.cpp
-E:\Engine\imgui\backends\imgui_impl_opengl3.cpp(126,10): error C1083: Не удается открыть файл включение: imgui.h: No such file or directory,
-  imgui.cpp
-  imgui_draw.cpp
-  imgui_tables.cpp
-  imgui_widgets.cpp
-  Создание кода...
