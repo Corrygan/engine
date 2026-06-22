@@ -1,9 +1,6 @@
 #pragma once
 #include <cstdint>
 
-// Рендерит сцену не напрямую в окно, а в текстуру (color attachment),
-// которую потом можно показать где угодно — например, внутри ImGui::Image()
-// в панели Viewport.
 class Framebuffer {
 public:
     Framebuffer(int width, int height);
@@ -12,7 +9,6 @@ public:
     void Bind();
     void Unbind();
 
-    // Пересоздаёт текстуры под новый размер. Если размер не изменился — ничего не делает.
     void Resize(int width, int height);
 
     uint32_t GetColorTexture() const { return m_colorTexture; }

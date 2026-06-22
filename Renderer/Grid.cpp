@@ -23,12 +23,10 @@ Grid::Grid() {
     for (float i = -kSize; i <= kSize + 0.001f; i += kStep) {
         bool isOriginLine = std::abs(i) < 0.001f;
 
-        // Линия с постоянным X = i, идёт вдоль Z. При i = 0 это сама ось Z.
         const float* colorZ = isOriginLine ? kZAxisColor : kGridColor;
         vertices.push_back({ { i, 0.0f, -kSize }, { colorZ[0], colorZ[1], colorZ[2] } });
         vertices.push_back({ { i, 0.0f,  kSize }, { colorZ[0], colorZ[1], colorZ[2] } });
 
-        // Линия с постоянным Z = i, идёт вдоль X. При i = 0 это сама ось X.
         const float* colorX = isOriginLine ? kXAxisColor : kGridColor;
         vertices.push_back({ { -kSize, 0.0f, i }, { colorX[0], colorX[1], colorX[2] } });
         vertices.push_back({ {  kSize, 0.0f, i }, { colorX[0], colorX[1], colorX[2] } });

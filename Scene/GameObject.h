@@ -7,7 +7,8 @@ enum class PrimitiveType {
     Camera,
     Light,
     Empty,
-    Plane
+    Plane,
+    Model
 };
 
 inline const char* ToString(PrimitiveType type) {
@@ -18,6 +19,7 @@ inline const char* ToString(PrimitiveType type) {
         case PrimitiveType::Light:  return "Light";
         case PrimitiveType::Empty:  return "Empty";
         case PrimitiveType::Plane:  return "Plane";
+        case PrimitiveType::Model:  return "Model";
     }
     return "Unknown";
 }
@@ -25,7 +27,11 @@ inline const char* ToString(PrimitiveType type) {
 struct GameObject {
     std::string name;
     PrimitiveType type = PrimitiveType::Cube;
+    std::string modelPath;
+    std::string materialPath;
+    float aabbMin[3]  = { -0.5f, -0.5f, -0.5f };
+    float aabbMax[3]  = {  0.5f,  0.5f,  0.5f };
     float position[3] = { 0.0f, 0.0f, 0.0f };
-    float rotation[3] = { 0.0f, 0.0f, 0.0f };
-    float scale[3] = { 1.0f, 1.0f, 1.0f };
+    float rotQuat[4]  = { 0.0f, 0.0f, 0.0f, 1.0f }; // x y z w  (identity)
+    float scale[3]    = { 1.0f, 1.0f, 1.0f };
 };

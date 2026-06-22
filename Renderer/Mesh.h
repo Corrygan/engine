@@ -1,16 +1,35 @@
 #pragma once
 #include <cstdint>
+#include <vector>
 
-// Заглушка-геометрия: единичный куб с нормалями (для базового освещения).
-// Пока в движке нет импорта мешей — каждый GameObject рисуется как такой куб.
-class CubeMesh {
+class PrimitiveMesh {
 public:
-    CubeMesh();
-    ~CubeMesh();
+    virtual ~PrimitiveMesh();
 
     void Draw() const;
+
+protected:
+    PrimitiveMesh() = default;
+
+    void Upload(const std::vector<float>& vertices);
 
 private:
     uint32_t m_vao = 0;
     uint32_t m_vbo = 0;
+    int m_vertexCount = 0;
+};
+
+class CubeMesh : public PrimitiveMesh {
+public:
+    CubeMesh();
+};
+
+class SphereMesh : public PrimitiveMesh {
+public:
+    explicit SphereMesh(int latSegments = 16, int lonSegments = 24);
+};
+
+class PlaneMesh : public PrimitiveMesh {
+public:
+    PlaneMesh();
 };

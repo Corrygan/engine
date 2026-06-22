@@ -3,7 +3,6 @@
 #include <vector>
 #include "../Scene/GameObject.h"
 
-// Бинарный нативный формат сцены движка (.escn).
 class SceneSerializer {
 public:
     static bool Save(const std::string& path, const std::vector<GameObject>& objects);

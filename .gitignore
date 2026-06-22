@@ -1,1 +1,10 @@
 .vs/
+.claude/
+Engine/
+out/
+x64/
+Engine.slnx
+Engine.vcxproj
+Engine.vcxproj.filers
+Engine.vcxproj.user
+imgui.ini

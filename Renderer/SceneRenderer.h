@@ -1,17 +1,17 @@
 #pragma once
 #include <cstdint>
 #include <vector>
+#include <string>
+#include <unordered_map>
 #include <glm/glm.hpp>
 #include "../Scene/GameObject.h"
 
 class Framebuffer;
 class Shader;
-class CubeMesh;
+class PrimitiveMesh;
+class ModelMesh;
 class Grid;
 
-// Рисует список GameObject'ов сцены в текстуру и возвращает её ID.
-// Полностью не знает про ImGui/редактор — просто отдаёт готовую текстуру.
-// Камеру (view/projection) ему передают снаружи — сам он камеру не считает.
 class SceneRenderer {
 public:
     SceneRenderer();
@@ -22,10 +22,17 @@ public:
         const glm::mat4& view, const glm::mat4& projection);
 
 private:
+    PrimitiveMesh* GetMeshForType(PrimitiveType type) const;
+    ModelMesh*     GetOrLoadModel(const std::string& emdlPath);
+
     Framebuffer* m_framebuffer = nullptr;
-    Shader* m_shader = nullptr;        // обычный лит-шейдер для объектов
-    Shader* m_lineShader = nullptr;    // безсветовой цветной шейдер для сетки
-    Shader* m_outlineShader = nullptr; // контур выделенного объекта
-    CubeMesh* m_cube = nullptr;
+    Shader* m_shader = nullptr;
+    Shader* m_lineShader = nullptr;
+    Shader* m_outlineShader = nullptr;
+    PrimitiveMesh* m_cube = nullptr;
+    PrimitiveMesh* m_sphere = nullptr;
+    PrimitiveMesh* m_plane = nullptr;
     Grid* m_grid = nullptr;
+
+    std::unordered_map<std::string, ModelMesh*> m_modelCache;
 };

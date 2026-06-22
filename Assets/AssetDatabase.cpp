@@ -1,8 +1,13 @@
 #include "AssetDatabase.h"
 #include "MetaFile.h"
+#include "ModelImporter.h"
 #include <filesystem>
 
 namespace fs = std::filesystem;
+
+static bool IsModelSource(const std::string& ext) {
+    return ext == ".obj" || ext == ".fbx" || ext == ".gltf" || ext == ".glb";
+}
 
 std::string AssetDatabase::MetaPathFor(const std::string& assetPath) {
     return assetPath + ".meta";
@@ -16,7 +21,6 @@ Guid AssetDatabase::GetOrCreateGuid(const std::string& assetPath, const std::str
         return meta.guid;
     }
 
-    // .meta нет, либо он битый/пустой — создаём новый.
     meta.guid = Guid::Generate();
     meta.type = assetType;
     meta.Save(metaPath);
@@ -31,10 +35,19 @@ int AssetDatabase::ScanFolder(const std::string& folderPath) {
         if (!entry.is_regular_file()) continue;
 
         const std::string path = entry.path().string();
-        if (entry.path().extension() == ".meta") continue;  // сами .meta пропускаем
+        const std::string ext  = entry.path().extension().string();
+
+        if (ext == ".meta" || ext == ".emdl" || ext == ".escn") continue;
+
+        if (IsModelSource(ext)) {
+            if (ModelImporter::NeedsReimport(path)) {
+                ModelImporter::Import(path);
+                ++createdCount;
+            }
+            continue;
+        }
 
         if (!fs::exists(MetaPathFor(path))) {
-            std::string ext = entry.path().extension().string();
             GetOrCreateGuid(path, ext.empty() ? "Unknown" : ext.substr(1));
             ++createdCount;
         }

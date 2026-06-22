@@ -1,17 +1,15 @@
 cmake_minimum_required(VERSION 3.20)
+
+set(VCPKG_TARGET_TRIPLET "x64-windows-static-md" CACHE STRING "")
+set(CMAKE_TOOLCHAIN_FILE "C:/vcpkg/scripts/buildsystems/vcpkg.cmake" CACHE STRING "")
+
 project(Engine LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# --------------------------------------------------------------------------
-# Dear ImGui (docking) — уже лежит исходниками в imgui/, FetchContent не нужен.
-# --------------------------------------------------------------------------
 set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/imgui)
 
-# --------------------------------------------------------------------------
-# Сам движок
-# --------------------------------------------------------------------------
 add_executable(Engine
     main.cpp
     UI/EditorUI.cpp
@@ -20,10 +18,17 @@ add_executable(Engine
     Assets/MetaFile.cpp
     Assets/AssetDatabase.cpp
     Assets/SceneSerializer.cpp
+    Assets/ModelImporter.cpp
 
     Renderer/Framebuffer.cpp
     Renderer/Shader.cpp
     Renderer/Mesh.cpp
+    Renderer/ModelMesh.cpp
+    Renderer/Material.cpp
+    Renderer/MaterialManager.cpp
+    Renderer/MaterialPreviewRenderer.cpp
+    Renderer/Texture.cpp
+    Renderer/TextureManager.cpp
     Renderer/Grid.cpp
     Renderer/EditorCamera.cpp
     Renderer/Picking.cpp
@@ -37,6 +42,7 @@ add_executable(Engine
     ${IMGUI_DIR}/imgui_tables.cpp
     ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
     ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
+    ${IMGUI_DIR}/ImGuizmo.cpp
 )
 
 target_include_directories(Engine PRIVATE
@@ -46,25 +52,27 @@ target_include_directories(Engine PRIVATE
     glm
     ${IMGUI_DIR}
     ${IMGUI_DIR}/backends
-    ${CMAKE_SOURCE_DIR}/lib/include/GLFW   # чтобы #include "glfw3.h" работал без префикса GLFW/
+    ${CMAKE_SOURCE_DIR}/lib/include/GLFW
 )
 
 find_package(OpenGL REQUIRED)
+find_package(assimp CONFIG REQUIRED)
 
-# GLFW уже собран и лежит как готовый .lib в lib/lib/ — просто линкуемся
-# напрямую на файл, отдельный target тут заводить не нужно.
 target_link_libraries(Engine PRIVATE
     ${CMAKE_SOURCE_DIR}/lib/lib/glfw3.lib
     OpenGL::GL
+    assimp::assimp
+    Comdlg32
 )
 
 if (MSVC)
     target_compile_definitions(Engine PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 
-# Чтобы при запуске из Visual Studio рабочая директория была корнем проекта,
-# а не папкой со сгенерированными build-файлами — важно для будущей загрузки
-# ассетов по относительным путям.
+target_compile_definitions(Engine PRIVATE
+    ENGINE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
 set_target_properties(Engine PROPERTIES
     VS_DEBUGGER_WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )

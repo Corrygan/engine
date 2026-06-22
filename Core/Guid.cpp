@@ -45,8 +45,6 @@ Guid Guid::Generate() {
         b = static_cast<uint8_t>(dist(engine));
     }
 
-    // Выставляем биты версии/варианта по RFC 4122 (UUID v4) — не обязательно
-    // для внутренней логики движка, но тогда строка выглядит как привычный UUID.
     guid.bytes[6] = (guid.bytes[6] & 0x0F) | 0x40;
     guid.bytes[8] = (guid.bytes[8] & 0x3F) | 0x80;
 
