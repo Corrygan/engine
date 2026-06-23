@@ -1,10 +1,11 @@
 .vs/
 .claude/
 Engine/
+Assets/Materials
 out/
 x64/
 Engine.slnx
 Engine.vcxproj
-Engine.vcxproj.filers
+Engine.vcxproj.filters
 Engine.vcxproj.user
 imgui.ini
