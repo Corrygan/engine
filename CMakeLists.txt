@@ -13,6 +13,7 @@ set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/imgui)
 add_executable(Engine
     main.cpp
     UI/EditorUI.cpp
+    UI/MaterialNodeEditor.cpp
 
     Core/Guid.cpp
     Assets/MetaFile.cpp
@@ -33,6 +34,10 @@ add_executable(Engine
     Renderer/EditorCamera.cpp
     Renderer/Picking.cpp
     Renderer/SceneRenderer.cpp
+    Renderer/MaterialGraph.cpp
+    Renderer/NodeCompiler.cpp
+
+    imnodes/imnodes.cpp
 
     glad/src/gl.c
 
@@ -53,6 +58,7 @@ target_include_directories(Engine PRIVATE
     ${IMGUI_DIR}
     ${IMGUI_DIR}/backends
     ${CMAKE_SOURCE_DIR}/lib/include/GLFW
+    ${CMAKE_SOURCE_DIR}/imnodes
 )
 
 find_package(OpenGL REQUIRED)
@@ -63,6 +69,7 @@ target_link_libraries(Engine PRIVATE
     OpenGL::GL
     assimp::assimp
     Comdlg32
+    Shell32
 )
 
 if (MSVC)

@@ -2,7 +2,7 @@
 #include <cstdint>
 
 static constexpr uint32_t kEmdlMagic   = 0x454D444C;
-static constexpr uint32_t kEmdlVersion = 2; // v2: added tangent + bitangent
+static constexpr uint32_t kEmdlVersion = 2;
 
 #pragma pack(push, 1)
 struct EmdlHeader {

@@ -178,6 +178,56 @@ void MaterialPreviewRenderer::ClearCache() {
     m_cache.clear();
 }
 
+uint32_t MaterialPreviewRenderer::RenderWithShader(
+        Shader* shader,
+        const std::vector<std::pair<std::string, std::string>>& texBindings) {
+    if (!shader) return 0;
+
+    m_fb->Bind();
+    glViewport(0, 0, 188, 188);
+    glEnable(GL_DEPTH_TEST);
+    glClearColor(0.12f, 0.12f, 0.15f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    glm::mat4 model      = glm::mat4(1.0f);
+    glm::vec3 camPos     = glm::vec3(0.0f, 0.0f, 2.5f);
+    glm::mat4 view       = glm::lookAt(camPos, glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+    glm::mat4 projection = glm::perspective(glm::radians(40.0f), 1.0f, 0.1f, 10.0f);
+
+    shader->Bind();
+    GLuint pid = shader->GetID();
+    glUniformMatrix4fv(glGetUniformLocation(pid, "uModel"), 1, GL_FALSE, glm::value_ptr(model));
+    glUniformMatrix4fv(glGetUniformLocation(pid, "uView"),  1, GL_FALSE, glm::value_ptr(view));
+    glUniformMatrix4fv(glGetUniformLocation(pid, "uProj"),  1, GL_FALSE, glm::value_ptr(projection));
+    glUniform3fv(glGetUniformLocation(pid, "uCamPos"),      1, glm::value_ptr(camPos));
+
+    int unit = 0;
+    for (auto& [uname, texPath] : texBindings) {
+        Texture* tex = texPath.empty() ? nullptr : TextureManager::GetOrLoad(texPath);
+        glActiveTexture(GL_TEXTURE0 + unit);
+        glBindTexture(GL_TEXTURE_2D, tex ? tex->GetID() : 0);
+        glUniform1i(glGetUniformLocation(pid, uname.c_str()), unit);
+        ++unit;
+    }
+
+    m_sphere->Draw();
+    shader->Unbind();
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    m_fb->Unbind();
+    return m_fb->GetColorTexture();
+}
+
+void MaterialPreviewRenderer::UpdatePreviewWithShader(
+        const std::string& path, Shader* shader,
+        const std::vector<std::pair<std::string, std::string>>& texBindings) {
+    uint32_t rendered = RenderWithShader(shader, texBindings);
+    if (!rendered) return;
+    InvalidatePreview(path);             // drop stale thumbnail
+    m_cache[path] = CopyToTexture(rendered);
+}
+
 uint32_t MaterialPreviewRenderer::Render(Material* mat) {
     if (!mat) return 0;
 

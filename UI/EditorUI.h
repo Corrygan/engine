@@ -5,6 +5,7 @@
 #include "ImGuizmo.h"
 #include "glfw3.h"
 #include "../Renderer/MaterialPreviewRenderer.h"
+#include "MaterialNodeEditor.h"
 #include <string>
 #include <vector>
 #include "../Scene/GameObject.h"
@@ -57,7 +58,6 @@ private:
 
     void RenderTitleBar();
     void RenderAssetBrowser();
-    void RenderMaterialEditor();
     void RenderGameObjectNode(GameObject& obj, int index);
     void RenderTransformEditor(GameObject* obj);
     void RenderUnsavedChangesDialog();
@@ -96,9 +96,8 @@ private:
     bool m_showUnsavedChangesDialog = false;
     std::string m_currentScenePath;
 
-    MaterialPreviewRenderer* m_previewRenderer   = nullptr;
-    bool                     m_showMaterialEditor = false;
-    std::string              m_editingMaterialPath;
+    MaterialPreviewRenderer* m_previewRenderer = nullptr;
+    MaterialNodeEditor*      m_nodeEditor      = nullptr;
 
 public:
     bool m_pendingMinimize = false;

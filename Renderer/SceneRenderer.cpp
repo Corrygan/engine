@@ -204,8 +204,28 @@ SceneRenderer::SceneRenderer() {
     m_grid = new Grid();
 }
 
+void SceneRenderer::RegisterNodeShader(const std::string& matPath,
+                                       Shader* shader,
+                                       std::vector<std::pair<std::string,std::string>> texBindings) {
+    // SceneRenderer takes ownership. Delete any previously-registered shader.
+    auto it = m_nodeShaders.find(matPath);
+    if (it != m_nodeShaders.end()) {
+        delete it->second.shader;
+    }
+    m_nodeShaders[matPath] = { shader, std::move(texBindings) };
+}
+
+void SceneRenderer::UnregisterNodeShader(const std::string& matPath) {
+    auto it = m_nodeShaders.find(matPath);
+    if (it != m_nodeShaders.end()) {
+        delete it->second.shader;
+        m_nodeShaders.erase(it);
+    }
+}
+
 SceneRenderer::~SceneRenderer() {
-    for (auto& [path, mesh] : m_modelCache) delete mesh;
+    for (auto& [path, mesh]  : m_modelCache)  delete mesh;
+    for (auto& [path, entry] : m_nodeShaders) delete entry.shader;
     delete m_grid;
     delete m_plane;
     delete m_sphere;
@@ -314,29 +334,10 @@ uint32_t SceneRenderer::Render(const std::vector<GameObject>& objects, int selec
         }
 
         const bool hasTangents = (modelMesh != nullptr);
-
-        m_shader->SetVec3 ("uColor",            color);
-        m_shader->SetFloat("uMetallic",          metallic);
-        m_shader->SetFloat("uRoughness",         roughness);
-        m_shader->SetVec3 ("uEmissive",          emissive);
-        m_shader->SetInt  ("uHasAlbedoTex",      albedoTex ? 1 : 0);
-        m_shader->SetInt  ("uHasNormalTex",       normalTex ? 1 : 0);
-        m_shader->SetInt  ("uHasMetalRoughTex",  mrTex     ? 1 : 0);
-        m_shader->SetInt  ("uHasTangents",        hasTangents ? 1 : 0);
-
-        if (albedoTex) albedoTex->Bind(0);
-        else { glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, 0); }
-
-        if (normalTex) normalTex->Bind(1);
-        else { glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, 0); }
-
-        if (mrTex) mrTex->Bind(2);
-        else { glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, 0); }
-
         glm::mat4 model = BuildModelMatrix(obj);
-        m_shader->SetMat4("uModel", model);
-
         bool isSelected = (static_cast<int>(i) == selectedIndex);
+
+        // Stencil setup (same for both shader paths)
         if (isSelected) {
             glStencilFunc(GL_ALWAYS, 1, 0xFF);
             glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
@@ -345,8 +346,61 @@ uint32_t SceneRenderer::Render(const std::vector<GameObject>& objects, int selec
             glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
         }
 
-        if (modelMesh) modelMesh->Draw();
-        else           primMesh->Draw();
+        // ── Node-compiled shader? ─────────────────────────────────────────
+        auto nodeIt = !obj.materialPath.empty()
+                    ? m_nodeShaders.find(obj.materialPath)
+                    : m_nodeShaders.end();
+
+        if (nodeIt != m_nodeShaders.end() && nodeIt->second.shader) {
+            Shader* cs = nodeIt->second.shader;
+            cs->Bind();
+            cs->SetMat4("uModel", model);
+            cs->SetMat4("uView",  view);
+            cs->SetMat4("uProj",  projection);
+            cs->SetVec3("uCamPos", camPos);
+
+            int unit = 0;
+            for (auto& [uname, texPath] : nodeIt->second.texBindings) {
+                Texture* tex = texPath.empty() ? nullptr : TextureManager::GetOrLoad(texPath);
+                glActiveTexture(GL_TEXTURE0 + unit);
+                glBindTexture(GL_TEXTURE_2D, tex ? tex->GetID() : 0);
+                glUniform1i(glGetUniformLocation(cs->GetID(), uname.c_str()), unit);
+                ++unit;
+            }
+
+            if (modelMesh) modelMesh->Draw();
+            else           primMesh->Draw();
+
+            cs->Unbind();
+
+            // Restore default shader state for remaining objects
+            m_shader->Bind();
+            m_shader->SetMat4("uView",       view);
+            m_shader->SetMat4("uProjection", projection);
+            m_shader->SetVec3("uCamPos",     camPos);
+        } else {
+            // ── Default PBR shader ────────────────────────────────────────
+            m_shader->SetVec3 ("uColor",            color);
+            m_shader->SetFloat("uMetallic",          metallic);
+            m_shader->SetFloat("uRoughness",         roughness);
+            m_shader->SetVec3 ("uEmissive",          emissive);
+            m_shader->SetInt  ("uHasAlbedoTex",      albedoTex ? 1 : 0);
+            m_shader->SetInt  ("uHasNormalTex",       normalTex ? 1 : 0);
+            m_shader->SetInt  ("uHasMetalRoughTex",  mrTex     ? 1 : 0);
+            m_shader->SetInt  ("uHasTangents",        hasTangents ? 1 : 0);
+
+            if (albedoTex) albedoTex->Bind(0);
+            else { glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, 0); }
+            if (normalTex) normalTex->Bind(1);
+            else { glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, 0); }
+            if (mrTex) mrTex->Bind(2);
+            else { glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, 0); }
+
+            m_shader->SetMat4("uModel", model);
+
+            if (modelMesh) modelMesh->Draw();
+            else           primMesh->Draw();
+        }
     }
 
     if (selectedIndex >= 0 && selectedIndex < static_cast<int>(objects.size())) {

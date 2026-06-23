@@ -13,6 +13,7 @@
 #include "ImGuizmo.h"
 #include "EditorUI.h"
 #include "UI/IconsFontAwesome6.h"
+#include "imnodes/imnodes.h"
 
 namespace {
     constexpr int kTitleBarH    = 32;
@@ -165,6 +166,8 @@ int main() {
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
+    // imnodes global init (per-editor contexts created separately)
+    ImNodes::SetImGuiContext(ImGui::GetCurrentContext());
 
     EditorUI editorUI;
     if (!editorUI.Initialize(window)) return -1;

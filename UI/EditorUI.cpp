@@ -1,4 +1,4 @@
-#define _CRT_SECURE_NO_WARNINGS
+﻿#define _CRT_SECURE_NO_WARNINGS
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include "EditorUI.h"
@@ -6,6 +6,7 @@
 #define GLFW_EXPOSE_NATIVE_WIN32
 #include "glfw3native.h"
 #include <windows.h>
+#include <shellapi.h>
 #include "imgui_internal.h"
 #include "../Assets/SceneSerializer.h"
 #include "../Assets/AssetDatabase.h"
@@ -30,7 +31,6 @@
 #include <unordered_set>
 #include <cstdint>
 #include <cmath>
-#include <windows.h>
 #include <commdlg.h>
 
 namespace {
@@ -160,7 +160,7 @@ namespace {
             snprintf(hex, sizeof(hex), "#%02X%02X%02X%02X",
                 (int)(color[0]*255),(int)(color[1]*255),(int)(color[2]*255),
                 hasAlpha ? (int)(color[3]*255) : 255);
-            ImGui::SetTooltip("%s  —  click to edit", hex);
+            ImGui::SetTooltip("%s  вЂ”  click to edit", hex);
         }
 
         ImGui::PopID();
@@ -304,6 +304,17 @@ bool EditorUI::Initialize(GLFWwindow* window) {
 
     m_sceneRenderer   = new SceneRenderer();
     m_previewRenderer = new MaterialPreviewRenderer();
+    m_nodeEditor      = new MaterialNodeEditor();
+
+    // When a material is renamed in the node editor, re-point objects + UI.
+    m_nodeEditor->SetRenameHandler([this](const std::string& oldP, const std::string& newP) {
+        for (auto& obj : m_gameObjects)
+            if (obj.materialPath == oldP) obj.materialPath = newP;
+        if (m_assetBrowserSelected == oldP) m_assetBrowserSelected = newP;
+        m_assetBrowserDirty = true;
+        m_sceneDirty = true;
+        LogInfo("Material renamed: " + std::filesystem::path(newP).stem().string());
+    });
 
     glfwSetWindowIconifyCallback(m_window, [](GLFWwindow*, int iconified) {
         if (!iconified) {
@@ -426,6 +437,7 @@ bool EditorUI::Initialize(GLFWwindow* window) {
 }
 
 void EditorUI::Shutdown() {
+    delete m_nodeEditor;      m_nodeEditor      = nullptr;
     delete m_previewRenderer; m_previewRenderer = nullptr;
     delete m_sceneRenderer;   m_sceneRenderer   = nullptr;
 }
@@ -454,7 +466,8 @@ void EditorUI::Render() {
     RenderInspector();
     RenderConsole();
     RenderAssetBrowser();
-    RenderMaterialEditor();
+
+    if (m_nodeEditor) m_nodeEditor->Render();
     RenderUnsavedChangesDialog();
 }
 
@@ -857,215 +870,7 @@ void EditorUI::RenderMenuBar() {
     ImGui::PopStyleVar(6);
 }
 
-void EditorUI::RenderMaterialEditor() {
-    if (m_showMaterialEditor && !ImGui::IsPopupOpen("##MatEditor"))
-        ImGui::OpenPopup("##MatEditor");
-
-    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-    ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(740, 530), ImGuiCond_Always);
-
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,  12.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,   ImVec2(22.0f, 18.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
-
-    constexpr ImGuiWindowFlags kModalFlags =
-        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
-        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar;
-
-    if (ImGui::BeginPopupModal("##MatEditor", nullptr, kModalFlags)) {
-        namespace fs = std::filesystem;
-
-        Material* mat = m_editingMaterialPath.empty()
-            ? nullptr : MaterialManager::GetOrLoad(m_editingMaterialPath);
-
-        // ── Header ────────────────────────────────────────────────────────
-        {
-            constexpr float kCloseW = 22.0f;
-            ImGui::Text("Material Editor");
-            ImGui::SameLine(ImGui::GetContentRegionMax().x - kCloseW);
-            if (IconButton(ICON_FA_XMARK, "##closematEd", ImVec2(kCloseW, kCloseW))) {
-                ImGui::CloseCurrentPopup();
-                m_showMaterialEditor = false;
-            }
-        }
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        if (!mat) {
-            ImGui::TextDisabled("Material not found.");
-            ImGui::EndPopup();
-            ImGui::PopStyleVar(3);
-            return;
-        }
-
-        // ── Material Name ─────────────────────────────────────────────────
-        static char s_nameBuf[256] = "";
-        static std::string s_lastPath;
-        if (s_lastPath != m_editingMaterialPath) {
-            s_lastPath = m_editingMaterialPath;
-            snprintf(s_nameBuf, sizeof(s_nameBuf), "%s",
-                fs::path(m_editingMaterialPath).stem().string().c_str());
-        }
-
-        ImGui::Text("Name");
-        ImGui::SameLine(70.0f);
-        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-        ImGui::InputText("##matname", s_nameBuf, sizeof(s_nameBuf));
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        // ── Preview + Properties ──────────────────────────────────────────
-        bool changed = false;
-        constexpr float kPreviewSz = 188.0f;
-        constexpr float kLabelW    = 88.0f;
-
-        // Sphere preview
-        ImGui::BeginGroup();
-        {
-            uint32_t prevTex = m_previewRenderer ? m_previewRenderer->Render(mat) : 0;
-            if (prevTex)
-                ImGui::Image((ImTextureID)(intptr_t)prevTex, ImVec2(kPreviewSz, kPreviewSz));
-            else {
-                ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.10f, 0.12f, 1.0f));
-                ImGui::BeginChild("##noprev", ImVec2(kPreviewSz, kPreviewSz), false);
-                ImGui::EndChild();
-                ImGui::PopStyleColor();
-            }
-        }
-        ImGui::EndGroup();
-
-        ImGui::SameLine(0, 18);
-
-        // Properties column
-        ImGui::BeginGroup();
-        {
-            auto Row = [&](const char* lbl, auto fn) {
-                ImGui::BeginTable("##pr", 2, ImGuiTableFlags_SizingFixedFit);
-                ImGui::TableSetupColumn("l", ImGuiTableColumnFlags_WidthFixed, kLabelW);
-                ImGui::TableSetupColumn("c", ImGuiTableColumnFlags_WidthStretch);
-                ImGui::TableNextRow();
-                ImGui::TableSetColumnIndex(0);
-                ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 2.0f);
-                ImGui::TextDisabled("%s", lbl);
-                ImGui::TableSetColumnIndex(1);
-                if (fn()) changed = true;
-                ImGui::EndTable();
-            };
-
-            constexpr float kIconBtn = 22.0f;
-            auto TexRow = [&](const char* lbl, std::string& path) {
-                ImGui::BeginTable(("##tx" + std::string(lbl)).c_str(), 4,
-                    ImGuiTableFlags_SizingFixedFit);
-                ImGui::TableSetupColumn("l", ImGuiTableColumnFlags_WidthFixed,   kLabelW);
-                ImGui::TableSetupColumn("n", ImGuiTableColumnFlags_WidthStretch);
-                ImGui::TableSetupColumn("b", ImGuiTableColumnFlags_WidthFixed,   kIconBtn);
-                ImGui::TableSetupColumn("x", ImGuiTableColumnFlags_WidthFixed,   kIconBtn);
-                ImGui::TableNextRow();
-
-                ImGui::TableSetColumnIndex(0);
-                ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 3.0f);
-                ImGui::TextDisabled("%s", lbl);
-
-                ImGui::TableSetColumnIndex(1);
-                ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 3.0f);
-                if (path.empty()) ImGui::TextDisabled("None");
-                else ImGui::TextDisabled("%s", fs::path(path).filename().string().c_str());
-
-                ImGui::TableSetColumnIndex(2);
-                {
-                    char bid[32]; snprintf(bid, sizeof(bid), "##ld%s", lbl);
-                    if (IconButton(ICON_FA_FOLDER_OPEN, bid, ImVec2(kIconBtn, kIconBtn)))
-                    {
-                        std::string p = OpenTextureFileDialog();
-                        if (!p.empty()) { path = p; changed = true; }
-                    }
-                }
-
-                ImGui::TableSetColumnIndex(3);
-                if (!path.empty()) {
-                    char cid[32]; snprintf(cid, sizeof(cid), "##cx%s", lbl);
-                    ImU32 redCol = IM_COL32(178, 76, 76, 255);
-                    if (IconButton(ICON_FA_XMARK, cid, ImVec2(kIconBtn, kIconBtn), redCol))
-                        { path.clear(); changed = true; }
-                }
-                ImGui::EndTable();
-            };
-
-            ImGui::TextDisabled("Surface");
-            Row("Base Color", [&]{ return ColorSwatchEdit("##mbcol",mat->color,true); });
-            Row("Metallic",   [&]{ return FillSlider("##mmet","Metallic", &mat->metallic,  0.0f, 1.0f); });
-            Row("Roughness",  [&]{ return FillSlider("##mrou","Roughness",&mat->roughness, 0.0f, 1.0f); });
-
-            ImGui::Spacing();
-            ImGui::TextDisabled("Emissive");
-            Row("Color",     [&]{ return ColorSwatchEdit("##mecol",mat->emissiveColor,false); });
-            Row("Intensity", [&]{ return FillSlider("##mei","Intensity",&mat->emissiveIntensity,0.0f,10.0f,"%.1f"); });
-
-            ImGui::Spacing();
-            ImGui::TextDisabled("Textures");
-            TexRow("Albedo", mat->albedoTexture);
-            TexRow("Normal", mat->normalTexture);
-            TexRow("ORM",    mat->ormTexture);
-        }
-        ImGui::EndGroup();
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        float btnW = 90.0f;
-        ImGui::SetCursorPosX((ImGui::GetContentRegionMax().x - btnW) * 0.5f);
-        if (ImGui::Button("Save##matsave", ImVec2(btnW, 0))) {
-            std::string trimmed = s_nameBuf;
-            auto f = trimmed.find_first_not_of(" \t");
-            if (f == std::string::npos) trimmed.clear();
-            else {
-                trimmed = trimmed.substr(f);
-                auto l = trimmed.find_last_not_of(" \t");
-                if (l != std::string::npos) trimmed = trimmed.substr(0, l + 1);
-            }
-
-            std::string currentStem = fs::path(m_editingMaterialPath).stem().string();
-            if (!trimmed.empty() && trimmed != currentStem) {
-                std::string     newFile = trimmed + ".emat";
-                fs::path        dir     = fs::path(m_editingMaterialPath).parent_path();
-                std::string     newPath = (dir / newFile).string();
-                std::error_code ec;
-                bool            exists  = fs::exists(newPath, ec);
-                if (!ec && !exists) {
-                    MaterialManager::Invalidate(m_editingMaterialPath);
-                    fs::rename(m_editingMaterialPath, newPath, ec);
-                    if (!ec) {
-                        for (auto& obj : m_gameObjects)
-                            if (obj.materialPath == m_editingMaterialPath)
-                                obj.materialPath = newPath;
-                        m_editingMaterialPath = newPath;
-                        m_assetBrowserDirty   = true;
-                        s_lastPath            = "";
-                    } else {
-                        snprintf(s_nameBuf, sizeof(s_nameBuf), "%s", currentStem.c_str());
-                    }
-                }
-            }
-
-            if (m_previewRenderer)
-                m_previewRenderer->InvalidatePreview(m_editingMaterialPath);
-            mat->Save(m_editingMaterialPath);
-            m_sceneDirty = true;
-            ImGui::CloseCurrentPopup();
-        }
-
-        ImGui::EndPopup();
-    }
-
-    ImGui::PopStyleVar(3);
-
-    if (!ImGui::IsPopupOpen("##MatEditor"))
-        m_showMaterialEditor = false;
-}
+// RenderMaterialEditor removed вЂ” use MaterialNodeEditor instead
 
 void EditorUI::RenderAssetBrowser() {
     namespace fs = std::filesystem;
@@ -1134,6 +939,46 @@ void EditorUI::RenderAssetBrowser() {
 
     ImGui::Separator();
 
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 2.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding,  ImVec2(4.0f, 2.0f));
+    if (ImGui::BeginTable("##abbar", 2, ImGuiTableFlags_SizingFixedFit)) {
+        ImGui::TableSetupColumn("txt", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("btn", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("%zu items", m_assetBrowserItems.size());
+        if (!m_assetBrowserSelected.empty()) {
+            ImGui::SameLine(0, 6);
+            ImGui::TextDisabled("|  %s",
+                fs::path(m_assetBrowserSelected).filename().string().c_str());
+        }
+        ImGui::TableSetColumnIndex(1);
+        if (ImGui::Button("New Material", ImVec2(-1, 0))) {
+            fs::create_directories("Assets/Materials");
+            int idx = 1;
+            std::string path;
+            do {
+                path = "Assets/Materials/Material_" + std::to_string(idx++) + ".emat";
+            } while (fs::exists(path));
+            Material mat;
+            if (mat.Save(path)) {
+                // Remove stale graph file from previous deleted material with same name
+                std::error_code ec;
+                fs::remove(path + ".graph", ec);
+                MaterialManager::Invalidate(path);
+                if (m_previewRenderer) m_previewRenderer->InvalidatePreview(path);
+                m_assetBrowserDirty = true;
+                if (m_nodeEditor) m_nodeEditor->Open(path, m_previewRenderer, m_sceneRenderer);
+                LogSuccess("Created: " + fs::path(path).filename().string());
+            }
+        }
+        ImGui::EndTable();
+    }
+    ImGui::PopStyleVar(2);
+
+    ImGui::Separator();
+
     constexpr float kCell = 72.0f;
     constexpr float kPad  =  6.0f;
     constexpr float kNameH = 18.0f;
@@ -1142,8 +987,7 @@ void EditorUI::RenderAssetBrowser() {
     float panelW  = ImGui::GetContentRegionAvail().x;
     int   columns = std::max(1, (int)(panelW / cellTotal));
 
-    ImGui::BeginChild("##assetGrid", ImVec2(0.0f, -ImGui::GetFrameHeightWithSpacing() - 4.0f),
-                      false, ImGuiWindowFlags_NoScrollbar);
+    ImGui::BeginChild("##assetGrid", ImVec2(0.0f, 0.0f), false);
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, 0.0f));
 
     for (int i = 0; i < (int)m_assetBrowserItems.size(); ++i) {
@@ -1179,6 +1023,62 @@ void EditorUI::RenderAssetBrowser() {
         ImVec2 rMax = ImGui::GetItemRectMax();
         ImDrawList* dl = ImGui::GetWindowDrawList();
 
+        // Context menu вЂ” BeginPopupContextItem must be directly after the item
+        ImGui::SetNextWindowSizeConstraints(ImVec2(150.0f, 0), ImVec2(300.0f, FLT_MAX));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(3.0f, 3.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,   ImVec2(0.0f, 0.0f));
+        if (ImGui::BeginPopupContextItem("##ctx", ImGuiPopupFlags_MouseButtonRight)) {
+            constexpr float kCtxR    = 5.0f;
+            constexpr float kItemH   = 24.0f;
+            constexpr float kTextPad = 10.0f;
+            const     float kW       = ImGui::GetContentRegionAvail().x;
+            auto CItem = [&](const char* label, ImDrawFlags rf) -> bool {
+                ImVec2    pos = ImGui::GetCursorScreenPos();
+                bool      r   = ImGui::InvisibleButton(label, ImVec2(kW, kItemH));
+                bool      hv  = ImGui::IsItemHovered();
+                bool      ac  = ImGui::IsItemActive();
+                ImDrawList* cdl = ImGui::GetWindowDrawList();
+                if (hv || ac) {
+                    ImU32 col = ac ? ImGui::GetColorU32(ImGuiCol_HeaderActive)
+                                   : ImGui::GetColorU32(ImGuiCol_HeaderHovered);
+                    cdl->AddRectFilled(pos, {pos.x + kW, pos.y + kItemH}, col, kCtxR, rf);
+                }
+                float textY = pos.y + (kItemH - ImGui::GetTextLineHeight()) * 0.5f;
+                cdl->AddText({pos.x + kTextPad, textY},
+                             ImGui::GetColorU32(ImGuiCol_Text), label);
+                return r;
+            };
+            if (item.ext == ".emat") {
+                if (CItem("Open Editor",      ImDrawFlags_RoundCornersTop))    { if (m_nodeEditor) m_nodeEditor->Open(item.path, m_previewRenderer, m_sceneRenderer); ImGui::CloseCurrentPopup(); }
+                if (CItem("Show in Explorer", ImDrawFlags_None))               { std::string a="/select,\""+item.path+"\""; ShellExecuteA(nullptr,"open","explorer.exe",a.c_str(),nullptr,SW_SHOWNORMAL); ImGui::CloseCurrentPopup(); }
+                ImGui::Separator();
+                if (CItem("Delete",           ImDrawFlags_RoundCornersBottom)) {
+                    std::error_code ec;
+                    if (m_sceneRenderer)   m_sceneRenderer->UnregisterNodeShader(item.path);
+                    if (m_previewRenderer) m_previewRenderer->InvalidatePreview(item.path);
+                    MaterialManager::Invalidate(item.path);
+                    fs::remove(item.path,          ec);
+                    fs::remove(item.path + ".meta",  ec);
+                    fs::remove(item.path + ".graph", ec);
+                    m_assetBrowserDirty = true;
+                    m_assetBrowserSelected.clear();
+                    ImGui::CloseCurrentPopup();
+                }
+            } else {
+                if (CItem("Show in Explorer", ImDrawFlags_RoundCornersTop))    { std::string a="/select,\""+item.path+"\""; ShellExecuteA(nullptr,"open","explorer.exe",a.c_str(),nullptr,SW_SHOWNORMAL); ImGui::CloseCurrentPopup(); }
+                if (CItem("Delete",           ImDrawFlags_RoundCornersBottom)) {
+                    std::error_code ec;
+                    fs::remove(item.path,         ec);
+                    fs::remove(item.path + ".meta", ec);
+                    m_assetBrowserDirty = true;
+                    m_assetBrowserSelected.clear();
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::PopStyleVar(2);
+
         if (selected)
             dl->AddRectFilled(rMin, rMax, IM_COL32(192, 54, 76, 45), 5.0f);
         else if (hovered)
@@ -1195,7 +1095,6 @@ void EditorUI::RenderAssetBrowser() {
             if (emat) {
                 uint32_t prev = m_previewRenderer->GetPreview(emat, item.path);
                 if (prev) {
-                    // DrawList — не создаёт item, не сдвигает курсор, не ломает drag
                     dl->AddImageRounded((ImTextureID)(intptr_t)prev,
                         icMin, icMax, ImVec2(0,1), ImVec2(1,0),
                         IM_COL32_WHITE, 6.0f);
@@ -1236,8 +1135,8 @@ void EditorUI::RenderAssetBrowser() {
                 m_assetBrowserSelected.clear();
                 m_assetBrowserDirty    = true;
             } else if (item.ext == ".emat") {
-                m_editingMaterialPath = item.path;
-                m_showMaterialEditor  = true;
+                if (m_nodeEditor)
+                    m_nodeEditor->Open(item.path, m_previewRenderer, m_sceneRenderer);
             } else if (item.ext == ".emdl") {
                 AddModelObject(item.path);
             } else if (item.ext==".obj"||item.ext==".fbx"||item.ext==".gltf"||item.ext==".glb") {
@@ -1259,7 +1158,6 @@ void EditorUI::RenderAssetBrowser() {
             }
         }
 
-        // Drag source — только для .emat
         if (item.ext == ".emat" && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
             ImGui::SetDragDropPayload("ASSET_EMAT", item.path.c_str(), item.path.size() + 1);
             namespace fs = std::filesystem;
@@ -1282,11 +1180,12 @@ void EditorUI::RenderAssetBrowser() {
             ImGui::EndDragDropSource();
         }
 
-        if (hovered && ImGui::BeginTooltip()) {
+        if (hovered && !ImGui::IsMouseDown(ImGuiMouseButton_Right) && ImGui::BeginTooltip()) {
             ImGui::Text("%s", item.name.c_str());
             ImGui::TextDisabled("%s", item.path.c_str());
             ImGui::EndTooltip();
         }
+
 
         ImGui::PopID();
     }
@@ -1297,14 +1196,6 @@ void EditorUI::RenderAssetBrowser() {
 
     ImGui::PopStyleVar();
     ImGui::EndChild();
-
-    ImGui::Separator();
-    ImGui::TextDisabled("%zu items", m_assetBrowserItems.size());
-    if (!m_assetBrowserSelected.empty()) {
-        ImGui::SameLine(0, 6);
-        ImGui::TextDisabled("|  %s",
-            fs::path(m_assetBrowserSelected).filename().string().c_str());
-    }
 
     ImGui::End();
 }
@@ -1355,7 +1246,6 @@ void EditorUI::RenderGameObjectNode(GameObject& obj, int index) {
         LogInfo("Selected: " + obj.name);
     }
 
-    // Mini material preview — справа, через DrawList (не перехватывает ввод)
     if (!obj.materialPath.empty() && m_previewRenderer) {
         Material* hmat = MaterialManager::GetOrLoad(obj.materialPath);
         if (hmat) {
@@ -1378,6 +1268,7 @@ void EditorUI::RenderGameObjectNode(GameObject& obj, int index) {
     if (ImGui::BeginDragDropTarget()) {
         if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("ASSET_EMAT")) {
             obj.materialPath = std::string(static_cast<const char*>(p->Data));
+            if (m_nodeEditor) m_nodeEditor->EnsureCompiled(obj.materialPath, m_sceneRenderer);
             m_sceneDirty = true;
             LogInfo("Material assigned to " + obj.name);
         }
@@ -1427,12 +1318,10 @@ void EditorUI::RenderViewport() {
         if (textureID != 0)
             ImGui::Image((ImTextureID)(intptr_t)textureID, viewportSize, ImVec2(0, 1), ImVec2(1, 0));
 
-        // Drop target: перетаскивание материала на viewport
         if (ImGui::BeginDragDropTarget()) {
             if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("ASSET_EMAT")) {
                 std::string matPath(static_cast<const char*>(p->Data));
 
-                // Pick объект под курсором
                 ImVec2 mousePos = ImGui::GetIO().MousePos;
                 ImVec2 vpMin    = imageScreenPos;
                 float ndcX = (2.0f * (mousePos.x - vpMin.x)) / viewportSize.x - 1.0f;
@@ -1442,15 +1331,15 @@ void EditorUI::RenderViewport() {
                 int targetIdx = (hitIdx >= 0) ? hitIdx : m_selectedObjectIndex;
                 if (targetIdx >= 0 && targetIdx < (int)m_gameObjects.size()) {
                     m_gameObjects[targetIdx].materialPath = matPath;
+                    if (m_nodeEditor) m_nodeEditor->EnsureCompiled(matPath, m_sceneRenderer);
                     m_selectedObjectIndex = targetIdx;
                     m_sceneDirty = true;
                     namespace fs = std::filesystem;
                     LogInfo("Material \"" + fs::path(matPath).stem().string()
-                        + "\" → " + m_gameObjects[targetIdx].name);
+                        + "\" в†’ " + m_gameObjects[targetIdx].name);
                 }
             }
 
-            // Подсказка во время hover
             if (ImGui::GetDragDropPayload() &&
                 ImGui::GetDragDropPayload()->IsDataType("ASSET_EMAT"))
             {
@@ -1500,7 +1389,7 @@ void EditorUI::RenderViewport() {
             {
                 if (m_gizmoOp == ImGuizmo::TRANSLATE) {
                     // delta[3] is the displacement in world space for both
-                    // WORLD and LOCAL modes — avoids the mModelSource*T_delta
+                    // WORLD and LOCAL modes вЂ” avoids the mModelSource*T_delta
                     // multiplication-order bug that rotates the delta.
                     sel.position[0] += delta[3][0];
                     sel.position[1] += delta[3][1];
@@ -1640,26 +1529,33 @@ void EditorUI::RenderInspector() {
         ImGui::Indent();
         if (selected->materialPath.empty()) {
             ImGui::TextDisabled("No material assigned");
-            if (ImGui::Button("New Material")) {
-                namespace fs = std::filesystem;
-                fs::create_directories("Assets/Materials");
-                int idx = 1;
-                std::string path;
-                do {
-                    path = "Assets/Materials/Material_" + std::to_string(idx++) + ".emat";
-                } while (fs::exists(path));
-                Material mat;
-                if (mat.Save(path)) {
-                    selected->materialPath = path;
-                    MaterialManager::Invalidate(path);
-                    m_sceneDirty        = true;
-                    m_assetBrowserDirty = true;
-                    LogSuccess("Material created: " + fs::path(path).filename().string());
+            ImGui::TextDisabled("Drag .emat from Asset Browser");
+        } else {
+            namespace fs = std::filesystem;
+            if (m_previewRenderer) {
+                Material* pm = MaterialManager::GetOrLoad(selected->materialPath);
+                if (pm) {
+                    uint32_t pt = m_previewRenderer->GetPreview(pm, selected->materialPath);
+                    if (pt) {
+                        ImDrawList* dl = ImGui::GetWindowDrawList();
+                        ImVec2 cp = ImGui::GetCursorScreenPos();
+                        constexpr float tsz = 22.0f;
+                        dl->AddImageRounded((ImTextureID)(intptr_t)pt,
+                            cp, {cp.x+tsz, cp.y+tsz}, ImVec2(0,1), ImVec2(1,0),
+                            IM_COL32_WHITE, 4.0f);
+                        ImGui::Dummy(ImVec2(tsz, tsz));
+                        ImGui::SameLine(0, 6);
+                    }
                 }
             }
-        } else {
-            ImGui::TextDisabled("%s",
-                std::filesystem::path(selected->materialPath).filename().string().c_str());
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 3.0f);
+            ImGui::TextDisabled("%s", fs::path(selected->materialPath).filename().string().c_str());
+            ImGui::SameLine(ImGui::GetContentRegionMax().x - 20.0f);
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() - 3.0f);
+            if (IconButton(ICON_FA_XMARK, "##detachmat", ImVec2(20.0f, 20.0f))) {
+                selected->materialPath.clear();
+                m_sceneDirty = true;
+            }
             Material* mat = MaterialManager::GetOrLoad(selected->materialPath);
             if (mat) {
                 bool changed = false;
@@ -1810,18 +1706,12 @@ void EditorUI::RenderInspector() {
                     }
                 }
 
-                ImGui::Spacing();
-                if (ImGui::Button("Open Material Editor")) {
-                    m_editingMaterialPath  = selected->materialPath;
-                    m_showMaterialEditor   = true;
+                if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+                    if (m_nodeEditor)
+                        m_nodeEditor->Open(selected->materialPath, m_previewRenderer, m_sceneRenderer);
                 }
-
-                ImGui::Separator();
-                ImGui::Spacing();
-                if (ImGui::Button("Remove Material")) {
-                    selected->materialPath.clear();
-                    m_sceneDirty = true;
-                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Double-click to open Node Editor");
             } else {
                 ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "File not found");
                 if (ImGui::Button("Clear")) {
@@ -1853,14 +1743,12 @@ void EditorUI::RenderTransformEditor(GameObject* obj) {
 
         ImGui::TextDisabled("%s", rowLabel);
 
-        // Use explicit screen positions so stacked buttons don't confuse SameLine
         ImVec2 rowOrigin = ImGui::GetCursorScreenPos();
         for (int i = 0; i < 3; ++i) {
             ImGui::SetCursorScreenPos({rowOrigin.x + i * (fieldW + gap), rowOrigin.y});
             char fid[32]; snprintf(fid, sizeof(fid), "##%s%d", rowLabel, i);
             if (FieldSpinner(fid, &v[i], step, vmin, vmax, fmt, fieldW)) changed = true;
         }
-        // Advance cursor past this row
         ImGui::SetCursorScreenPos({rowOrigin.x, rowOrigin.y + h + gap});
         return changed;
     };
@@ -1948,32 +1836,32 @@ bool EditorUI::SaveCurrentScene() {
 
 void EditorUI::RenderUnsavedChangesDialog() {
     if (m_showUnsavedChangesDialog)
-        ImGui::OpenPopup("Несохранённые изменения");
+        ImGui::OpenPopup("РќРµСЃРѕС…СЂР°РЅС‘РЅРЅС‹Рµ РёР·РјРµРЅРµРЅРёСЏ");
 
     ImVec2 center = ImGui::GetMainViewport()->GetCenter();
     ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
 
-    if (ImGui::BeginPopupModal("Несохранённые изменения", nullptr,
+    if (ImGui::BeginPopupModal("РќРµСЃРѕС…СЂР°РЅС‘РЅРЅС‹Рµ РёР·РјРµРЅРµРЅРёСЏ", nullptr,
             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar)) {
-        ImGui::Text("В сцене есть несохранённые изменения.");
-        ImGui::Text("Сохранить перед закрытием?");
+        ImGui::Text("Р’ СЃС†РµРЅРµ РµСЃС‚СЊ РЅРµСЃРѕС…СЂР°РЅС‘РЅРЅС‹Рµ РёР·РјРµРЅРµРЅРёСЏ.");
+        ImGui::Text("РЎРѕС…СЂР°РЅРёС‚СЊ РїРµСЂРµРґ Р·Р°РєСЂС‹С‚РёРµРј?");
         ImGui::Separator();
         ImGui::Spacing();
 
-        if (ImGui::Button("Сохранить", ImVec2(110, 0))) {
+        if (ImGui::Button("РЎРѕС…СЂР°РЅРёС‚СЊ", ImVec2(110, 0))) {
             if (SaveCurrentScene())
                 glfwSetWindowShouldClose(m_window, 1);
             m_showUnsavedChangesDialog = false;
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Закрыть", ImVec2(110, 0))) {
+        if (ImGui::Button("Р—Р°РєСЂС‹С‚СЊ", ImVec2(110, 0))) {
             m_showUnsavedChangesDialog = false;
             ImGui::CloseCurrentPopup();
             glfwSetWindowShouldClose(m_window, 1);
         }
         ImGui::SameLine();
-        if (ImGui::Button("Отмена", ImVec2(110, 0))) {
+        if (ImGui::Button("РћС‚РјРµРЅР°", ImVec2(110, 0))) {
             m_showUnsavedChangesDialog = false;
             ImGui::CloseCurrentPopup();
         }
