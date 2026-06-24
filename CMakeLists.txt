@@ -36,6 +36,7 @@ add_executable(Engine
     Renderer/SceneRenderer.cpp
     Renderer/MaterialGraph.cpp
     Renderer/NodeCompiler.cpp
+    Renderer/EnvironmentMap.cpp
 
     imnodes/imnodes.cpp
 

@@ -103,11 +103,12 @@ void MaterialNodeEditor::Open(const std::string& matPath, MaterialPreviewRendere
     TryCompile();
 }
 
-void MaterialNodeEditor::EnsureCompiled(const std::string& matPath, SceneRenderer* sr) {
+void MaterialNodeEditor::EnsureCompiled(const std::string& matPath, SceneRenderer* sr,
+                                        MaterialPreviewRenderer* preview) {
     std::string graphPath = matPath + ".graph";
     if (!fs::exists(graphPath)) return;          // no graph — use default PBR
-    // Don't clobber the graph currently being edited.
-    if (m_open) return;
+    // The currently-edited material is managed live by the editor — leave it.
+    if (m_open && matPath == m_matPath) return;
 
     // Compile into a temporary graph without touching the editor's own state.
     MaterialGraph tmp;
@@ -145,9 +146,13 @@ void main(){
     std::vector<std::pair<std::string, std::string>> texBindings;
     for (auto& [nodeId, uname] : compiled.texUniforms) {
         GraphNode* node = tmp.FindNode(nodeId);
-        if (node && node->kind == NodeKind::Texture2D)
+        if (node && (node->kind == NodeKind::Texture2D || node->kind == NodeKind::NormalMap))
             texBindings.emplace_back(uname, node->texPath);
     }
+
+    // Refresh the cached thumbnail (uses the shader before ownership transfer).
+    if (preview) preview->UpdatePreviewWithShader(matPath, shader, texBindings);
+
     if (sr) sr->RegisterNodeShader(matPath, shader, std::move(texBindings));
     else    delete shader;
 }
@@ -230,7 +235,7 @@ void main(){
     std::vector<std::pair<std::string, std::string>> texBindings;
     for (auto& [nodeId, uname] : m_compiled.texUniforms) {
         GraphNode* node = m_graph.FindNode(nodeId);
-        if (node && node->kind == NodeKind::Texture2D)
+        if (node && (node->kind == NodeKind::Texture2D || node->kind == NodeKind::NormalMap))
             texBindings.emplace_back(uname, node->texPath);
     }
 
@@ -465,7 +470,8 @@ void MaterialNodeEditor::RenderCanvas() {
                 if (ImGui::DragFloat("##fval", &node.floatVal, 0.01f, 0.0f, 1.0f, "%.3f"))
                     m_dirty = true, m_compileTimer = 0.0f;
                 break;
-            case NodeKind::Texture2D: {
+            case NodeKind::Texture2D:
+            case NodeKind::NormalMap: {
                 if (!node.texPath.empty()) {
                     Texture* t = TextureManager::GetOrLoad(node.texPath);
                     if (t) {
@@ -513,22 +519,83 @@ void MaterialNodeEditor::RenderCanvas() {
     for (auto& n : m_graph.nodes)
         n.pos = ImNodes::GetNodeGridSpacePos(n.id);
 
-    // Right-click → add node menu (IsNodeHovered/IsLinkHovered only valid here)
+    // ── Deletion helpers (shared by Delete key and right-click menu) ─────
+    auto deleteNodeById = [&](int sid) -> bool {
+        GraphNode* n = m_graph.FindNode(sid);
+        if (!n || n->kind == NodeKind::MaterialOutput) return false;
+        std::vector<GraphPin> pins = n->inputs;
+        for (auto& p : n->outputs) pins.push_back(p);
+        m_graph.links.erase(std::remove_if(m_graph.links.begin(), m_graph.links.end(),
+            [&](const GraphLink& l){
+                for (auto& p : pins) if (l.fromPin == p.id || l.toPin == p.id) return true;
+                return false;
+            }), m_graph.links.end());
+        m_graph.nodes.erase(std::find_if(m_graph.nodes.begin(), m_graph.nodes.end(),
+            [sid](const GraphNode& nd){ return nd.id == sid; }));
+        return true;
+    };
+    auto deleteLinkById = [&](int lid) -> bool {
+        size_t before = m_graph.links.size();
+        m_graph.links.erase(std::remove_if(m_graph.links.begin(), m_graph.links.end(),
+            [lid](const GraphLink& l){ return l.id == lid; }), m_graph.links.end());
+        return m_graph.links.size() != before;
+    };
+
+    // Right-click: node/link → context menu; empty canvas → add-node menu.
     {
         int hovNode = -1, hovLink = -1;
         bool onNode = ImNodes::IsNodeHovered(&hovNode);
         bool onLink = ImNodes::IsLinkHovered(&hovLink);
         if (ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByPopup
                                    | ImGuiHoveredFlags_ChildWindows)
-            && ImGui::IsMouseClicked(ImGuiMouseButton_Right)
-            && !onNode && !onLink)
+            && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
         {
-            ImVec2 mp = ImGui::GetMousePos();
-            m_addMenuX = mp.x;
-            m_addMenuY = mp.y;
-            ImGui::OpenPopup("##addNode");
+            if (onNode)      { m_ctxNode = hovNode; ImGui::OpenPopup("##nodeCtx"); }
+            else if (onLink) { m_ctxLink = hovLink; ImGui::OpenPopup("##linkCtx"); }
+            else {
+                ImVec2 mp = ImGui::GetMousePos();
+                m_addMenuX = mp.x;
+                m_addMenuY = mp.y;
+                ImGui::OpenPopup("##addNode");
+            }
         }
     }
+
+    // Rounded context-menu item (no sharp accent rectangle on hover).
+    auto roundedItem = [&](const char* label) -> bool {
+        constexpr float h = 24.0f, pad = 10.0f, r = 5.0f;
+        float w = ImGui::GetContentRegionAvail().x;
+        ImVec2 pos = ImGui::GetCursorScreenPos();
+        bool clicked = ImGui::InvisibleButton(label, ImVec2(w, h));
+        bool hv = ImGui::IsItemHovered(), ac = ImGui::IsItemActive();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        if (hv || ac)
+            dl->AddRectFilled(pos, ImVec2(pos.x + w, pos.y + h),
+                ImGui::GetColorU32(ac ? ImGuiCol_HeaderActive : ImGuiCol_HeaderHovered), r);
+        float ty = pos.y + (h - ImGui::GetTextLineHeight()) * 0.5f;
+        dl->AddText(ImVec2(pos.x + pad, ty), ImGui::GetColorU32(ImGuiCol_Text), label);
+        return clicked;
+    };
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 4));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 6.0f);
+    ImGui::SetNextWindowSize(ImVec2(184, 0));
+    if (ImGui::BeginPopup("##nodeCtx")) {
+        if (roundedItem(ICON_FA_TRASH "  Delete Node")) {
+            if (deleteNodeById(m_ctxNode)) CommitNow();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::SetNextWindowSize(ImVec2(184, 0));
+    if (ImGui::BeginPopup("##linkCtx")) {
+        if (roundedItem(ICON_FA_TRASH "  Delete Link")) {
+            if (deleteLinkById(m_ctxLink)) CommitNow();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleVar(2);
     RenderAddNodeMenu();
 
     // Handle new link
@@ -571,38 +638,29 @@ void MaterialNodeEditor::RenderCanvas() {
         CommitNow();
     }
 
-    // Delete selected nodes/links — guard against WantTextInput (DragFloat etc.)
-    if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) && !ImGui::GetIO().WantTextInput) {
-        int selCount = ImNodes::NumSelectedNodes();
-        if (selCount > 0) {
-            std::vector<int> selIds(selCount);
-            ImNodes::GetSelectedNodes(selIds.data());
-            for (int sid : selIds) {
-                auto* n = m_graph.FindNode(sid);
-                if (!n || n->kind == NodeKind::MaterialOutput) continue;
-                // Remove links connected to this node's pins
-                auto allPins = n->inputs;
-                for (auto& p : n->outputs) allPins.push_back(p);
-                m_graph.links.erase(std::remove_if(m_graph.links.begin(), m_graph.links.end(),
-                    [&](const GraphLink& l){
-                        for (auto& p : allPins) if (l.fromPin==p.id||l.toPin==p.id) return true;
-                        return false;
-                    }), m_graph.links.end());
-                m_graph.nodes.erase(std::find_if(m_graph.nodes.begin(), m_graph.nodes.end(),
-                    [sid](const GraphNode& nd){ return nd.id == sid; }));
-            }
-            CommitNow();
+    // Delete selected nodes/links via Delete/Backspace. Guarded by
+    // !IsAnyItemActive() so it won't fire while editing a field in a node.
+    if ((ImGui::IsKeyPressed(ImGuiKey_Delete, false) ||
+         ImGui::IsKeyPressed(ImGuiKey_Backspace, false)) && !ImGui::IsAnyItemActive()) {
+        bool changed = false;
+
+        int nNodes = ImNodes::NumSelectedNodes();
+        if (nNodes > 0) {
+            std::vector<int> ids(nNodes);
+            ImNodes::GetSelectedNodes(ids.data());
+            for (int id : ids) if (deleteNodeById(id)) changed = true;
+            ImNodes::ClearNodeSelection();
         }
-        int selLinkCount = ImNodes::NumSelectedLinks();
-        if (selLinkCount > 0) {
-            std::vector<int> selLinks(selLinkCount);
-            ImNodes::GetSelectedLinks(selLinks.data());
-            for (int lid : selLinks) {
-                m_graph.links.erase(std::remove_if(m_graph.links.begin(), m_graph.links.end(),
-                    [lid](const GraphLink& l){ return l.id == lid; }), m_graph.links.end());
-            }
-            CommitNow();
+
+        int nLinks = ImNodes::NumSelectedLinks();
+        if (nLinks > 0) {
+            std::vector<int> ids(nLinks);
+            ImNodes::GetSelectedLinks(ids.data());
+            for (int id : ids) if (deleteLinkById(id)) changed = true;
+            ImNodes::ClearLinkSelection();
         }
+
+        if (changed) CommitNow();
     }
 
     // Track selected node for sidebar
@@ -634,10 +692,11 @@ void MaterialNodeEditor::RenderAddNodeMenu() {
 
         ImGui::TextDisabled("Constants");
         ImGui::Separator();
-        addItem("Color",     NodeKind::Color);
-        addItem("Float",     NodeKind::Float);
-        addItem("Texture2D", NodeKind::Texture2D);
-        addItem("UV",        NodeKind::UV);
+        addItem("Color",      NodeKind::Color);
+        addItem("Float",      NodeKind::Float);
+        addItem("Texture2D",  NodeKind::Texture2D);
+        addItem("Normal Map", NodeKind::NormalMap);
+        addItem("UV",         NodeKind::UV);
 
         ImGui::Spacing();
         ImGui::TextDisabled("Math");
@@ -648,12 +707,22 @@ void MaterialNodeEditor::RenderAddNodeMenu() {
         addItem("One Minus", NodeKind::OneMinus);
         addItem("Power",     NodeKind::Power);
         addItem("Clamp",     NodeKind::Clamp);
+        addItem("Remap",     NodeKind::Remap);
+
+        ImGui::Spacing();
+        ImGui::TextDisabled("Animation");
+        ImGui::Separator();
+        addItem("Time",      NodeKind::Time);
+        addItem("Panner",    NodeKind::Panner);
+        addItem("Rotator",   NodeKind::Rotator);
 
         ImGui::Spacing();
         ImGui::TextDisabled("Utilities");
         ImGui::Separator();
-        addItem("Split RGB", NodeKind::SplitRGB);
-        addItem("Make RGB",  NodeKind::MakeRGB);
+        addItem("Split RGB",       NodeKind::SplitRGB);
+        addItem("Make RGB",        NodeKind::MakeRGB);
+        addItem("Fresnel",         NodeKind::Fresnel);
+        addItem("Normal Strength", NodeKind::NormalStrength);
 
         ImGui::EndPopup();
     }
@@ -669,7 +738,7 @@ void MaterialNodeEditor::RenderSidebar() {
             std::vector<std::pair<std::string, std::string>> texBindings;
             for (auto& [nodeId, uname] : m_compiled.texUniforms) {
                 GraphNode* node = m_graph.FindNode(nodeId);
-                if (node && node->kind == NodeKind::Texture2D)
+                if (node && (node->kind == NodeKind::Texture2D || node->kind == NodeKind::NormalMap))
                     texBindings.emplace_back(uname, node->texPath);
             }
             tex = m_preview->RenderWithShader(m_compiledShader, texBindings);
@@ -715,8 +784,9 @@ void MaterialNodeEditor::RenderNodeProperties(GraphNode& node) {
             ImGui::Text("Value");
             changed |= ImGui::DragFloat("##fprop", &node.floatVal, 0.01f, 0.0f, 1.0f);
             break;
-        case NodeKind::Texture2D: {
-            ImGui::TextDisabled("Texture");
+        case NodeKind::Texture2D:
+        case NodeKind::NormalMap: {
+            ImGui::TextDisabled(node.kind == NodeKind::NormalMap ? "Normal Map" : "Texture");
             ImGui::Spacing();
             if (!node.texPath.empty()) {
                 // Preview thumbnail
@@ -752,6 +822,8 @@ void MaterialNodeEditor::RenderNodeProperties(GraphNode& node) {
         for (auto& pin : node.inputs) {
             bool connected = m_graph.FindLinkToPin(pin.id) != nullptr;
             if (connected) continue;
+            // Material Output's Normal is connection-only (no editable default).
+            if (node.kind == NodeKind::MaterialOutput && pin.name == "Normal") continue;
             ImGui::PushID(pin.id);
             if (pin.type == PinType::Float)
                 changed |= ImGui::DragFloat(pin.name.c_str(), &pin.defFloat, 0.01f, 0.0f, 1.0f);

@@ -1,4 +1,5 @@
 #include "NodeCompiler.h"
+#include "LightingGLSL.h"
 #include <sstream>
 #include <functional>
 #include <algorithm>
@@ -159,6 +160,81 @@ void NodeCompiler::EmitNode(const GraphNode& node, Context& ctx) {
             ctx.pinVar[node.outputs[0].id] = var;
             break;
         }
+        case NodeKind::NormalMap: {
+            char uname[64]; snprintf(uname, sizeof(uname), "uTex%d", node.id);
+            ctx.texUniforms += "uniform sampler2D " + std::string(uname) + ";\n";
+            ctx.texUniformMap[node.id] = uname;
+
+            std::string uvExpr = "vUV";
+            auto* uvLink = const_cast<MaterialGraph&>(g).FindLinkToPin(node.inputs[0].id);
+            if (uvLink) {
+                auto it = ctx.pinVar.find(uvLink->fromPin);
+                if (it != ctx.pinVar.end()) uvExpr = it->second;
+            }
+            // Unpack to tangent-space normal.
+            ctx.code += "    vec3 " + std::string(var) + " = texture(" + std::string(uname) +
+                        ", " + uvExpr + ").rgb * 2.0 - 1.0;\n";
+            ctx.pinVar[node.outputs[0].id] = var;
+            break;
+        }
+        case NodeKind::Time: {
+            ctx.code += "    float " + std::string(var) + " = uTime;\n";
+            ctx.pinVar[node.outputs[0].id] = var;
+            break;
+        }
+        case NodeKind::Fresnel: {
+            std::string power = inp(0, PinType::Float);
+            ctx.code += "    float " + std::string(var) +
+                        " = pow(clamp(1.0 - max(dot(Ng, V), 0.0), 0.0, 1.0), max(" +
+                        power + ", 0.0001));\n";
+            ctx.pinVar[node.outputs[0].id] = var;
+            break;
+        }
+        case NodeKind::Panner: {
+            // UV input defaults to vUV when unconnected.
+            std::string uv = "vUV";
+            auto* uvLink = const_cast<MaterialGraph&>(g).FindLinkToPin(node.inputs[0].id);
+            if (uvLink) { auto it = ctx.pinVar.find(uvLink->fromPin);
+                          if (it != ctx.pinVar.end()) uv = it->second; }
+            std::string sx = inp(1, PinType::Float), sy = inp(2, PinType::Float);
+            ctx.code += "    vec2 " + std::string(var) + " = (" + uv +
+                        ") + uTime * vec2(" + sx + ", " + sy + ");\n";
+            ctx.pinVar[node.outputs[0].id] = var;
+            break;
+        }
+        case NodeKind::Rotator: {
+            std::string uv = "vUV";
+            auto* uvLink = const_cast<MaterialGraph&>(g).FindLinkToPin(node.inputs[0].id);
+            if (uvLink) { auto it = ctx.pinVar.find(uvLink->fromPin);
+                          if (it != ctx.pinVar.end()) uv = it->second; }
+            std::string ang = inp(1, PinType::Float);
+            std::string v = var;
+            ctx.code += "    vec2 " + v + "_c = (" + uv + ") - 0.5;\n";
+            ctx.code += "    float " + v + "_a = " + ang + ";\n";
+            ctx.code += "    vec2 " + v + " = vec2(" + v + "_c.x*cos(" + v + "_a) - " + v +
+                        "_c.y*sin(" + v + "_a), " + v + "_c.x*sin(" + v + "_a) + " + v +
+                        "_c.y*cos(" + v + "_a)) + 0.5;\n";
+            ctx.pinVar[node.outputs[0].id] = var;
+            break;
+        }
+        case NodeKind::Remap: {
+            std::string v  = inp(0, PinType::Float);
+            std::string i0 = inp(1, PinType::Float), i1 = inp(2, PinType::Float);
+            std::string o0 = inp(3, PinType::Float), o1 = inp(4, PinType::Float);
+            ctx.code += "    float " + std::string(var) + " = " + o0 + " + (" + v + " - " + i0 +
+                        ") * (" + o1 + " - " + o0 + ") / max((" + i1 + " - " + i0 + "), 1e-5);\n";
+            ctx.pinVar[node.outputs[0].id] = var;
+            break;
+        }
+        case NodeKind::NormalStrength: {
+            std::string n = inp(0, PinType::Vec3), s = inp(1, PinType::Float);
+            std::string v = var;
+            ctx.code += "    vec3 " + v + "_n = " + n + ";\n";
+            ctx.code += "    vec3 " + v + " = normalize(vec3(" + v + "_n.xy * " + s + ", max(" +
+                        v + "_n.z, 0.01)));\n";
+            ctx.pinVar[node.outputs[0].id] = var;
+            break;
+        }
         case NodeKind::MaterialOutput:
             break;
     }
@@ -211,7 +287,19 @@ CompiledShader NodeCompiler::Compile(const MaterialGraph& graph) {
     std::string roughness = getOut(2, PinType::Float, "0.5");
     std::string emissive  = getOut(3, PinType::Vec3, "vec3(0.0)");
 
-    result.fragSrc     = BuildFragSrc(ctx.texUniforms, ctx.code, baseColor, metallic, roughness, emissive);
+    // Normal input (index 4) is tangent-space; only used when something is wired in.
+    std::string normalExpr;
+    bool        hasNormal = false;
+    if (outputNode->inputs.size() > 4) {
+        auto* nl = const_cast<MaterialGraph&>(graph).FindLinkToPin(outputNode->inputs[4].id);
+        if (nl) {
+            hasNormal  = true;
+            normalExpr = GetInput(outputNode->inputs[4], PinType::Vec3, ctx, graph);
+        }
+    }
+
+    result.fragSrc     = BuildFragSrc(ctx.texUniforms, ctx.code, baseColor, metallic, roughness,
+                                      emissive, normalExpr, hasNormal);
     result.texUniforms = ctx.texUniformMap;
     result.valid       = true;
     return result;
@@ -219,7 +307,8 @@ CompiledShader NodeCompiler::Compile(const MaterialGraph& graph) {
 
 std::string NodeCompiler::BuildFragSrc(const std::string& texUniforms, const std::string& nodeCode,
                                        const std::string& baseColor, const std::string& metallic,
-                                       const std::string& roughness, const std::string& emissive) {
+                                       const std::string& roughness, const std::string& emissive,
+                                       const std::string& normalExpr, bool hasNormal) {
     std::string src = R"(
 #version 330 core
 in vec3 vNormal;
@@ -230,6 +319,8 @@ in vec3 vBitangent;
 
 uniform vec3 uCamPos;
 uniform vec3 uSelectedColor;
+uniform float uTime;
+uniform int  uTonemap;   // 1 = tonemap+gamma here (preview); 0 = linear HDR (scene post)
 )";
     src += texUniforms;
     src += R"(
@@ -238,40 +329,43 @@ const float PI = 3.14159265359;
 float D_GGX(float NdotH,float r){float a=r*r;float a2=a*a;float d=NdotH*NdotH*(a2-1.0)+1.0;return a2/(PI*d*d);}
 float G_Smith(float NdotV,float NdotL,float r){float k=(r+1.0)*(r+1.0)/8.0;return(NdotV/(NdotV*(1.0-k)+k))*(NdotL/(NdotL*(1.0-k)+k));}
 vec3 F_Schlick(float c,vec3 F0){return F0+(1.0-F0)*pow(clamp(1.0-c,0.0,1.0),5.0);}
+)";
+    src += kLightingGLSL;        // shared scene-light loop (shadePBR)
+    src += R"(
+// Tangent frame from screen-space derivatives — works without vertex tangents.
+mat3 cotangentFrame(vec3 N, vec3 p, vec2 uv){
+    vec3 dp1 = dFdx(p);  vec3 dp2 = dFdy(p);
+    vec2 du1 = dFdx(uv); vec2 du2 = dFdy(uv);
+    vec3 dp2perp = cross(dp2, N);
+    vec3 dp1perp = cross(N, dp1);
+    vec3 T = dp2perp*du1.x + dp1perp*du2.x;
+    vec3 B = dp2perp*du1.y + dp1perp*du2.y;
+    float invmax = inversesqrt(max(dot(T,T), dot(B,B)));
+    return mat3(T*invmax, B*invmax, N);
+}
 void main(){
+    vec3 Ng = normalize(vNormal);                 // geometric normal (for Fresnel etc.)
+    vec3 V  = normalize(uCamPos - vWorldPos);
 )";
     src += nodeCode;
     src += "    vec3 albedoLin = pow(" + baseColor + ", vec3(2.2));\n";
     src += "    float met  = clamp(" + metallic  + ", 0.0, 1.0);\n";
     src += "    float rou  = max("   + roughness + ", 0.04);\n";
     src += "    vec3 emi   = "       + emissive  + ";\n";
-    src += R"(
-    vec3 N = normalize(vNormal);
-    vec3 V = normalize(uCamPos - vWorldPos);
-    vec3 F0 = mix(vec3(0.04), albedoLin, met);
-    vec3 Lo = vec3(0.0);
-    vec3 lightDirs[3];
-    lightDirs[0]=normalize(vec3( 1.2, 2.0,  1.5));
-    lightDirs[1]=normalize(vec3(-1.5, 0.5,  1.0));
-    lightDirs[2]=normalize(vec3( 0.0,-1.0,  2.0));
-    vec3 lightCols[3];
-    lightCols[0]=vec3(3.2,3.0,2.8);
-    lightCols[1]=vec3(0.6,0.8,1.2);
-    lightCols[2]=vec3(1.0,1.0,1.0);
-    for(int i=0;i<3;i++){
-        vec3 L=lightDirs[i]; vec3 H=normalize(V+L);
-        float NdotL=max(dot(N,L),0.0); float NdotV=max(dot(N,V),0.0);
-        float NdotH=max(dot(N,H),0.0);
-        float D=D_GGX(NdotH,rou); float G=G_Smith(NdotV,NdotL,rou);
-        vec3  F=F_Schlick(max(dot(H,V),0.0),F0);
-        vec3 spec=(D*G*F)/max(4.0*NdotV*NdotL,0.001);
-        vec3 kD=(vec3(1.0)-F)*(1.0-met);
-        Lo+=(kD*albedoLin/PI+spec)*lightCols[i]*NdotL;
+    if (hasNormal) {
+        src += "    vec3 N  = normalize(cotangentFrame(Ng, vWorldPos, vUV) * normalize("
+               + normalExpr + "));\n";
+    } else {
+        src += "    vec3 N = Ng;\n";
     }
-    vec3 ambient=vec3(0.03)*albedoLin;
+    src += R"(
+    vec3 Lo = shadePBR(N, V, albedoLin, met, rou);
+    vec3 ambient = iblAmbient(N, V, albedoLin, met, rou, 1.0);
     vec3 color=ambient+Lo+emi;
-    color=color/(color+vec3(1.0));
-    color=pow(color,vec3(1.0/2.2));
+    if (uTonemap == 1) {                  // preview path
+        color = color/(color+vec3(1.0));
+        color = pow(color, vec3(1.0/2.2));
+    }
     FragColor=vec4(color,1.0);
 }
 )";

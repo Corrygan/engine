@@ -8,7 +8,8 @@ enum class PinType  { Float, Vec2, Vec3, Vec4 };
 enum class NodeKind {
     Float, Color, Texture2D, UV,
     Multiply, Add, Mix, OneMinus, Power, Clamp,
-    SplitRGB, MakeRGB,
+    SplitRGB, MakeRGB, NormalMap,
+    Time, Fresnel, Panner, Rotator, Remap, NormalStrength,
     MaterialOutput
 };
 

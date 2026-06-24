@@ -6,7 +6,7 @@
 
 namespace {
     constexpr char     kMagic[4] = { 'E', 'S', 'C', 'N' };
-    constexpr uint32_t kVersion  = 4;
+    constexpr uint32_t kVersion  = 5;   // v5: added light properties
 
     void WriteString(std::ofstream& file, const std::string& str) {
         uint32_t len = static_cast<uint32_t>(str.size());
@@ -47,6 +47,14 @@ bool SceneSerializer::Save(const std::string& path, const std::vector<GameObject
         file.write(reinterpret_cast<const char*>(obj.position), sizeof(obj.position));
         file.write(reinterpret_cast<const char*>(obj.rotQuat),  sizeof(obj.rotQuat));
         file.write(reinterpret_cast<const char*>(obj.scale),    sizeof(obj.scale));
+
+        // v5: light properties
+        file.write(reinterpret_cast<const char*>(&obj.lightType),      sizeof(obj.lightType));
+        file.write(reinterpret_cast<const char*>(obj.lightColor),      sizeof(obj.lightColor));
+        file.write(reinterpret_cast<const char*>(&obj.lightIntensity), sizeof(obj.lightIntensity));
+        file.write(reinterpret_cast<const char*>(&obj.lightRange),     sizeof(obj.lightRange));
+        file.write(reinterpret_cast<const char*>(&obj.spotInnerDeg),   sizeof(obj.spotInnerDeg));
+        file.write(reinterpret_cast<const char*>(&obj.spotOuterDeg),   sizeof(obj.spotOuterDeg));
     }
 
     return true;
@@ -62,7 +70,7 @@ bool SceneSerializer::Load(const std::string& path, std::vector<GameObject>& out
 
     uint32_t version = 0;
     if (!file.read(reinterpret_cast<char*>(&version), sizeof(version))) return false;
-    if (version != kVersion) return false;
+    if (version != 4 && version != 5) return false;   // v4 = pre-light scenes
 
     Guid sceneGuid;
     if (!file.read(reinterpret_cast<char*>(sceneGuid.bytes.data()), sceneGuid.bytes.size())) return false;
@@ -88,6 +96,16 @@ bool SceneSerializer::Load(const std::string& path, std::vector<GameObject>& out
         if (!file.read(reinterpret_cast<char*>(obj.position), sizeof(obj.position))) return false;
         if (!file.read(reinterpret_cast<char*>(obj.rotQuat),  sizeof(obj.rotQuat)))  return false;
         if (!file.read(reinterpret_cast<char*>(obj.scale),    sizeof(obj.scale)))    return false;
+
+        // v5: light properties (v4 scenes keep GameObject defaults)
+        if (version >= 5) {
+            if (!file.read(reinterpret_cast<char*>(&obj.lightType),      sizeof(obj.lightType)))      return false;
+            if (!file.read(reinterpret_cast<char*>(obj.lightColor),      sizeof(obj.lightColor)))      return false;
+            if (!file.read(reinterpret_cast<char*>(&obj.lightIntensity), sizeof(obj.lightIntensity))) return false;
+            if (!file.read(reinterpret_cast<char*>(&obj.lightRange),     sizeof(obj.lightRange)))      return false;
+            if (!file.read(reinterpret_cast<char*>(&obj.spotInnerDeg),   sizeof(obj.spotInnerDeg)))    return false;
+            if (!file.read(reinterpret_cast<char*>(&obj.spotOuterDeg),   sizeof(obj.spotOuterDeg)))    return false;
+        }
 
         outObjects.push_back(std::move(obj));
     }

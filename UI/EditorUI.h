@@ -8,6 +8,7 @@
 #include "MaterialNodeEditor.h"
 #include <string>
 #include <vector>
+#include <unordered_set>
 #include "../Scene/GameObject.h"
 #include "../Renderer/EditorCamera.h"
 
@@ -57,10 +58,16 @@ private:
     void RenderConsole();
 
     void RenderTitleBar();
+    void RenderViewportToolbar();    // icon-only bar above the viewport (play/render/settings)
+    void RenderViewportTimeline();   // placeholder timeline strip below the viewport
     void RenderAssetBrowser();
     void RenderGameObjectNode(GameObject& obj, int index);
+
+    static constexpr float kViewportToolbarH  = 38.0f;
+    static constexpr float kViewportTimelineH = 96.0f;
     void RenderTransformEditor(GameObject* obj);
     void RenderUnsavedChangesDialog();
+    void RequestClose();   // X/Exit: prompt if dirty, else close
     void AddConsoleMessage(const std::string& message, ConsoleMessage::Type type);
     bool SaveCurrentScene();
 
@@ -91,6 +98,7 @@ private:
     std::string             m_assetBrowserSelected;
     std::vector<AssetItem>  m_assetBrowserItems;
     bool                    m_assetBrowserDirty    = true;
+    std::unordered_set<std::string> m_compiledGraphs;   // node materials already precompiled
 
     bool m_sceneDirty = false;
     bool m_showUnsavedChangesDialog = false;

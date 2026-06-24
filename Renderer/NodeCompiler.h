@@ -34,5 +34,6 @@ private:
     static std::string TypeStr(PinType t);
     static std::string BuildFragSrc(const std::string& texUniforms, const std::string& nodeCode,
                                     const std::string& baseColor, const std::string& metallic,
-                                    const std::string& roughness, const std::string& emissive);
+                                    const std::string& roughness, const std::string& emissive,
+                                    const std::string& normalExpr, bool hasNormal);
 };

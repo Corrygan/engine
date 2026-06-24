@@ -65,3 +65,7 @@
 #define ICON_FA_BARS            "\xef\x83\x89"
 // U+F1DE
 #define ICON_FA_SLIDERS         "\xef\x87\x9e"
+// U+F0EB
+#define ICON_FA_LIGHTBULB       "\xef\x83\xab"
+// U+F185
+#define ICON_FA_SUN             "\xef\x86\x85"

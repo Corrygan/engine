@@ -311,6 +311,7 @@ bool EditorUI::Initialize(GLFWwindow* window) {
         for (auto& obj : m_gameObjects)
             if (obj.materialPath == oldP) obj.materialPath = newP;
         if (m_assetBrowserSelected == oldP) m_assetBrowserSelected = newP;
+        m_compiledGraphs.erase(oldP);          // re-precompile under the new path
         m_assetBrowserDirty = true;
         m_sceneDirty = true;
         LogInfo("Material renamed: " + std::filesystem::path(newP).stem().string());
@@ -593,7 +594,7 @@ void EditorUI::RenderTitleBar() {
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
             localY >= 0.0f && localY < kTitleH && fromRight > 0.0f)
         {
-            if      (fromRight <= kBtnW)       glfwSetWindowShouldClose(m_window, 1);
+            if      (fromRight <= kBtnW)       RequestClose();
             else if (fromRight <= kBtnW * 2)   m_pendingMaximize = true;
             else if (fromRight <= kBtnW * 3)   m_pendingMinimize = true;
         }
@@ -628,7 +629,7 @@ void EditorUI::RenderDockspace() {
     RenderMenuBar();
 
     ImGui::SetCursorPos(ImVec2(0.0f, kHeaderH));
-    ImGuiID dockspaceID = ImGui::GetID("EditorDockspaceV2");
+    ImGuiID dockspaceID = ImGui::GetID("EditorDockspaceV3");
     ImGui::DockSpace(dockspaceID, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_None);
 
     static bool layoutBuilt = false;
@@ -641,12 +642,12 @@ void EditorUI::RenderDockspace() {
         ImGui::DockBuilderSetNodeSize(dockspaceID, dockSize);
 
         ImGuiID dockMain   = dockspaceID;
-        ImGuiID dockBottom = ImGui::DockBuilderSplitNode(dockMain,   ImGuiDir_Down,  0.26f, nullptr, &dockMain);
-        ImGuiID dockLeft   = ImGui::DockBuilderSplitNode(dockMain,   ImGuiDir_Left,  0.18f, nullptr, &dockMain);
-        ImGuiID dockRight  = ImGui::DockBuilderSplitNode(dockMain,   ImGuiDir_Right, 0.22f, nullptr, &dockMain);
+        ImGuiID dockBottom = ImGui::DockBuilderSplitNode(dockMain,   ImGuiDir_Down,  0.19f, nullptr, &dockMain);
+        ImGuiID dockLeft   = ImGui::DockBuilderSplitNode(dockMain,   ImGuiDir_Left,  0.15f, nullptr, &dockMain);
+        ImGuiID dockRight  = ImGui::DockBuilderSplitNode(dockMain,   ImGuiDir_Right, 0.17f, nullptr, &dockMain);
 
         ImGuiID dockBotRight = 0;
-        ImGuiID dockBotLeft  = ImGui::DockBuilderSplitNode(dockBottom, ImGuiDir_Left, 0.58f,
+        ImGuiID dockBotLeft  = ImGui::DockBuilderSplitNode(dockBottom, ImGuiDir_Left, 0.62f,
                                                             nullptr, &dockBotRight);
 
         for (ImGuiID id : { dockLeft, dockRight, dockBotLeft, dockBotRight, dockMain })
@@ -803,7 +804,7 @@ void EditorUI::RenderMenuBar() {
         }
         ImGui::Separator();
         if (RMenuItem("Exit",    "Alt+F4", ImDrawFlags_RoundCornersBottom))
-            glfwSetWindowShouldClose(m_window, true);
+            RequestClose();
         PopupCloseCheck();
         ImGui::EndPopup();
     }
@@ -920,6 +921,18 @@ void EditorUI::RenderAssetBrowser() {
                     if (a.isDir != b.isDir) return a.isDir > b.isDir;
                     return a.name < b.name;
                 });
+
+            // Compile node materials up front (once each) so thumbnails + scene
+            // objects use the graph shader immediately, without opening the editor.
+            if (m_nodeEditor) {
+                for (const auto& it : m_assetBrowserItems) {
+                    if (it.ext == ".emat" && !m_compiledGraphs.count(it.path)
+                        && fs::exists(it.path + ".graph")) {
+                        m_nodeEditor->EnsureCompiled(it.path, m_sceneRenderer, m_previewRenderer);
+                        m_compiledGraphs.insert(it.path);
+                    }
+                }
+            }
         }
     }
 
@@ -1057,6 +1070,7 @@ void EditorUI::RenderAssetBrowser() {
                     if (m_sceneRenderer)   m_sceneRenderer->UnregisterNodeShader(item.path);
                     if (m_previewRenderer) m_previewRenderer->InvalidatePreview(item.path);
                     MaterialManager::Invalidate(item.path);
+                    m_compiledGraphs.erase(item.path);
                     fs::remove(item.path,          ec);
                     fs::remove(item.path + ".meta",  ec);
                     fs::remove(item.path + ".graph", ec);
@@ -1154,6 +1168,11 @@ void EditorUI::RenderAssetBrowser() {
                     LogSuccess("Scene loaded: " + item.name);
                 } else {
                     LogError("Failed to load scene: " + item.name);
+                }
+            } else if (item.ext == ".hdr") {
+                if (m_sceneRenderer) {
+                    m_sceneRenderer->SetEnvironmentHDR(item.path);
+                    LogSuccess("Environment set: " + item.name);
                 }
             }
         }
@@ -1294,12 +1313,180 @@ void EditorUI::RenderGameObjectNode(GameObject& obj, int index) {
     }
 }
 
+void EditorUI::RenderViewportToolbar() {
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(30, 30, 35, 255));
+    ImGui::BeginChild("##vptoolbar", ImVec2(0, kViewportToolbarH), false,
+                      ImGuiWindowFlags_NoScrollbar);
+
+    const ImVec2 bsz(30.0f, 26.0f);
+    ImGui::SetCursorPos(ImVec2(8.0f, (kViewportToolbarH - bsz.y) * 0.5f));
+
+    // Play / Stop — placeholders until play mode exists.
+    if (IconButton(ICON_FA_PLAY, "##vp_play", bsz)) { /* TODO: enter play mode */ }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Play (coming soon)");
+    ImGui::SameLine(0, 4);
+    if (IconButton(ICON_FA_STOP, "##vp_stop", bsz)) { /* TODO: stop */ }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stop");
+
+    // Render screenshot.
+    ImGui::SameLine(0, 14);
+    if (IconButton(ICON_FA_IMAGE, "##vp_shot", bsz)) {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        fs::create_directories("Assets/Screenshots", ec);
+        int n = 1; std::string p;
+        do { p = "Assets/Screenshots/Screenshot_" + std::to_string(n++) + ".bmp"; }
+        while (fs::exists(p));
+        if (m_sceneRenderer && m_sceneRenderer->SaveScreenshot(p))
+            LogSuccess("Screenshot saved: " + p);
+        else
+            LogError("Screenshot failed");
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Render screenshot");
+
+    // Render settings (post-processing) — gear pinned to the right.
+    ImGui::SameLine();
+    ImGui::SetCursorPosX(ImGui::GetWindowWidth() - bsz.x - 8.0f);
+    if (IconButton(ICON_FA_GEAR, "##vp_settings", bsz)) ImGui::OpenPopup("##postfx");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Render settings");
+
+    ImGui::SetNextWindowSize(ImVec2(270, 0));
+    if (ImGui::BeginPopup("##postfx")) {
+        ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.88f, 1.0f), "Post-Processing");
+        ImGui::Separator();
+        ImGui::Spacing();
+        if (m_sceneRenderer) {
+            float exposure = m_sceneRenderer->GetExposure();
+            ImGui::TextDisabled("Exposure");
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::DragFloat("##exposure", &exposure, 0.01f, 0.05f, 8.0f, "%.2f"))
+                m_sceneRenderer->SetExposure(exposure);
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("Anti-Aliasing");
+            const char* aaNames[] = { "None", "FXAA" };
+            int aa = (int)m_sceneRenderer->GetAAMode();
+            ImGui::SetNextItemWidth(-1);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 5.0f);
+            if (ImGui::BeginCombo("##aamode", aaNames[aa])) {
+                ImGui::PushStyleColor(ImGuiCol_HeaderHovered, IM_COL32(192, 54, 76, 160));
+                ImGui::PushStyleColor(ImGuiCol_Header,        IM_COL32(192, 54, 76, 200));
+                for (int i = 0; i < IM_ARRAYSIZE(aaNames); ++i) {
+                    bool sel = (aa == i);
+                    if (ImGui::Selectable(aaNames[i], sel))
+                        m_sceneRenderer->SetAAMode((SceneRenderer::AAMode)i);
+                    if (sel) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::PopStyleColor(2);
+                ImGui::EndCombo();
+            }
+            ImGui::PopStyleVar();
+
+            ImGui::Spacing();
+            bool bloom = m_sceneRenderer->GetBloomEnabled();
+            if (ImGui::Checkbox("Bloom", &bloom))
+                m_sceneRenderer->SetBloomEnabled(bloom);
+            if (bloom) {
+                float th = m_sceneRenderer->GetBloomThreshold();
+                ImGui::TextDisabled("Threshold");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::DragFloat("##bloomth", &th, 0.01f, 0.0f, 5.0f, "%.2f"))
+                    m_sceneRenderer->SetBloomThreshold(th);
+                float inten = m_sceneRenderer->GetBloomIntensity();
+                ImGui::TextDisabled("Intensity");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::DragFloat("##bloomint", &inten, 0.01f, 0.0f, 3.0f, "%.2f"))
+                    m_sceneRenderer->SetBloomIntensity(inten);
+            }
+
+            ImGui::Spacing();
+            bool ssao = m_sceneRenderer->GetSSAOEnabled();
+            if (ImGui::Checkbox("SSAO", &ssao))
+                m_sceneRenderer->SetSSAOEnabled(ssao);
+            if (ssao) {
+                float rad = m_sceneRenderer->GetSSAORadius();
+                ImGui::TextDisabled("Radius");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::DragFloat("##ssaorad", &rad, 0.01f, 0.05f, 3.0f, "%.2f"))
+                    m_sceneRenderer->SetSSAORadius(rad);
+                float pw = m_sceneRenderer->GetSSAOPower();
+                ImGui::TextDisabled("Strength");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::DragFloat("##ssaopow", &pw, 0.02f, 0.1f, 6.0f, "%.2f"))
+                    m_sceneRenderer->SetSSAOPower(pw);
+            }
+
+            ImGui::Spacing();
+            bool ssr = m_sceneRenderer->GetSSREnabled();
+            if (ImGui::Checkbox("SSR (reflections)", &ssr))
+                m_sceneRenderer->SetSSREnabled(ssr);
+            if (ssr) {
+                float si = m_sceneRenderer->GetSSRIntensity();
+                ImGui::TextDisabled("Intensity");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::DragFloat("##ssrint", &si, 0.01f, 0.0f, 2.0f, "%.2f"))
+                    m_sceneRenderer->SetSSRIntensity(si);
+            }
+
+            ImGui::Spacing();
+            ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.88f, 1.0f), "Color Grading");
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            float contrast = m_sceneRenderer->GetContrast();
+            ImGui::TextDisabled("Contrast");
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::DragFloat("##contrast", &contrast, 0.005f, 0.5f, 2.0f, "%.2f"))
+                m_sceneRenderer->SetContrast(contrast);
+
+            float sat = m_sceneRenderer->GetSaturation();
+            ImGui::TextDisabled("Saturation");
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::DragFloat("##saturation", &sat, 0.005f, 0.0f, 2.0f, "%.2f"))
+                m_sceneRenderer->SetSaturation(sat);
+
+            float temp = m_sceneRenderer->GetTemperature();
+            ImGui::TextDisabled("Temperature");
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::DragFloat("##temperature", &temp, 0.005f, -1.0f, 1.0f, "%.2f"))
+                m_sceneRenderer->SetTemperature(temp);
+
+            float vig = m_sceneRenderer->GetVignette();
+            ImGui::TextDisabled("Vignette");
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::DragFloat("##vignette", &vig, 0.005f, 0.0f, 1.0f, "%.2f"))
+                m_sceneRenderer->SetVignette(vig);
+        }
+        ImGui::EndPopup();
+    }
+
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+}
+
+void EditorUI::RenderViewportTimeline() {
+    // Pin to the bottom of the viewport window.
+    ImGui::SetCursorPos(ImVec2(0.0f, ImGui::GetWindowHeight() - kViewportTimelineH));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(24, 24, 28, 255));
+    ImGui::BeginChild("##vptimeline", ImVec2(0, kViewportTimelineH), true,
+                      ImGuiWindowFlags_NoScrollbar);
+    ImGui::TextDisabled("Timeline");
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+}
+
 void EditorUI::RenderViewport() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
     ImGui::Begin("Viewport", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleVar();
 
+    // Icon toolbar above the 3D view (play / render / settings).
+    RenderViewportToolbar();
+
+    // The 3D view fills the space between the toolbar and the bottom timeline.
     ImVec2 viewportSize = ImGui::GetContentRegionAvail();
+    viewportSize.y = (viewportSize.y > kViewportTimelineH + 1.0f)
+                     ? viewportSize.y - kViewportTimelineH : 1.0f;
     m_viewportWidth  = viewportSize.x;
     m_viewportHeight = viewportSize.y;
 
@@ -1359,6 +1546,95 @@ void EditorUI::RenderViewport() {
             }
 
             ImGui::EndDragDropTarget();
+        }
+    }
+
+    // ── Light gizmo icons + selected-light range overlay ─────────────────
+    // Lights have no mesh; draw a billboarded bulb icon so they're visible.
+    {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        glm::mat4 viewProj = projection * view;
+        constexpr float kPi = 3.14159265358979f;
+
+        // World point → screen position; false if behind the camera.
+        auto toScreen = [&](const glm::vec3& w, ImVec2& out) -> bool {
+            glm::vec4 c = viewProj * glm::vec4(w, 1.0f);
+            if (c.w <= 0.0001f) return false;
+            glm::vec3 n = glm::vec3(c) / c.w;
+            out = ImVec2(imageScreenPos.x + (n.x * 0.5f + 0.5f) * viewportSize.x,
+                         imageScreenPos.y + (1.0f - (n.y * 0.5f + 0.5f)) * viewportSize.y);
+            return true;
+        };
+        // Two orthonormal vectors spanning the plane perpendicular to n.
+        auto planeBasis = [](const glm::vec3& n, glm::vec3& u, glm::vec3& v) {
+            glm::vec3 a = (fabsf(n.y) < 0.99f) ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
+            u = glm::normalize(glm::cross(a, n));
+            v = glm::normalize(glm::cross(n, u));
+        };
+        // World-space circle drawn as projected segments (handles partial clip).
+        auto worldCircle = [&](const glm::vec3& C, const glm::vec3& u, const glm::vec3& v,
+                               float R, ImU32 col) {
+            const int N = 48;
+            ImVec2 prev; bool havePrev = false;
+            for (int k = 0; k <= N; ++k) {
+                float t = (float)k / N * 2.0f * kPi;
+                glm::vec3 w = C + R * (cosf(t) * u + sinf(t) * v);
+                ImVec2 s; bool ok = toScreen(w, s);
+                if (ok && havePrev) dl->AddLine(prev, s, col, 1.2f);
+                prev = s; havePrev = ok;
+            }
+        };
+
+        for (size_t i = 0; i < m_gameObjects.size(); ++i) {
+            const GameObject& o = m_gameObjects[i];
+            if (o.type != PrimitiveType::Light) continue;
+
+            glm::vec3 pos(o.position[0], o.position[1], o.position[2]);
+            bool sel = (static_cast<int>(i) == m_selectedObjectIndex);
+
+            ImVec2 sp;
+            bool   onScreen = toScreen(pos, sp);
+
+            // Range / cone overlay — only for the selected light, kept subtle.
+            if (sel) {
+                glm::mat4 m   = BuildModelMatrix(o);
+                glm::vec3 dir = glm::normalize(glm::mat3(m) * glm::vec3(0.0f, 0.0f, -1.0f));
+                ImU32 line = IM_COL32((int)(o.lightColor[0] * 255), (int)(o.lightColor[1] * 255),
+                                      (int)(o.lightColor[2] * 255), 70);   // low alpha = subtle
+
+                if (o.lightType == 1) {                       // Point → wireframe sphere
+                    worldCircle(pos, glm::vec3(1,0,0), glm::vec3(0,1,0), o.lightRange, line);
+                    worldCircle(pos, glm::vec3(0,1,0), glm::vec3(0,0,1), o.lightRange, line);
+                    worldCircle(pos, glm::vec3(1,0,0), glm::vec3(0,0,1), o.lightRange, line);
+                } else if (o.lightType == 2) {                // Spot → cone
+                    glm::vec3 u, v; planeBasis(dir, u, v);
+                    glm::vec3 base   = pos + dir * o.lightRange;
+                    float     radius = o.lightRange * tanf(glm::radians(o.spotOuterDeg));
+                    worldCircle(base, u, v, radius, line);
+                    for (int k = 0; k < 4; ++k) {             // 4 edge lines apex → rim
+                        float t = (float)k / 4 * 2.0f * kPi;
+                        glm::vec3 rim = base + radius * (cosf(t) * u + sinf(t) * v);
+                        ImVec2 a, b;
+                        if (toScreen(pos, a) && toScreen(rim, b)) dl->AddLine(a, b, line, 1.2f);
+                    }
+                } else {                                      // Directional → short ray
+                    ImVec2 a, b;
+                    if (toScreen(pos, a) && toScreen(pos + dir * 3.0f, b))
+                        dl->AddLine(a, b, line, 1.5f);
+                }
+            }
+
+            if (!onScreen) continue;
+
+            ImU32  tint = IM_COL32((int)(o.lightColor[0] * 255), (int)(o.lightColor[1] * 255),
+                                   (int)(o.lightColor[2] * 255), 255);
+            const char* icon = (o.lightType == 0) ? ICON_FA_SUN : ICON_FA_LIGHTBULB;
+            ImVec2 ts = ImGui::CalcTextSize(icon);
+            ImVec2 tp(sp.x - ts.x * 0.5f, sp.y - ts.y * 0.5f);
+
+            if (sel) dl->AddCircle(sp, ts.x * 0.9f, IM_COL32(255, 200, 80, 220), 0, 2.0f);
+            dl->AddText(ImVec2(tp.x + 1, tp.y + 1), IM_COL32(0, 0, 0, 160), icon);  // shadow
+            dl->AddText(tp, tint, icon);
         }
     }
 
@@ -1478,6 +1754,9 @@ void EditorUI::RenderViewport() {
             m_gameObjects.size(), opName, modeName, ImGui::GetIO().Framerate);
     }
 
+    // Timeline strip below the 3D view (placeholder for now).
+    RenderViewportTimeline();
+
     ImGui::End();
 }
 
@@ -1496,6 +1775,43 @@ void EditorUI::RenderInspector() {
         ImGui::Indent();
         RenderTransformEditor(selected);
         ImGui::Unindent();
+
+        if (selected->type == PrimitiveType::Light) {
+            ImGui::Separator();
+            ImGui::Text("Light");
+            ImGui::Indent();
+            bool lc = false;
+
+            const char* kinds[] = { "Directional", "Point", "Spot" };
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::Combo("##ltype", &selected->lightType, kinds, 3)) lc = true;
+            if (selected->lightType < 0) selected->lightType = 0;
+            if (selected->lightType > 2) selected->lightType = 2;
+
+            ImGui::TextDisabled("Color");
+            if (ImGui::ColorEdit3("##lcol", selected->lightColor,
+                                  ImGuiColorEditFlags_NoInputs)) lc = true;
+
+            ImGui::TextDisabled("Intensity");
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::DragFloat("##lint", &selected->lightIntensity, 0.05f, 0.0f, 100.0f, "%.2f")) lc = true;
+
+            if (selected->lightType != 0) {  // point / spot
+                ImGui::TextDisabled("Range");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::DragFloat("##lrange", &selected->lightRange, 0.1f, 0.1f, 1000.0f, "%.1f")) lc = true;
+            }
+            if (selected->lightType == 2) {  // spot
+                ImGui::TextDisabled("Cone (inner / outer deg)");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::DragFloat2("##lcone", &selected->spotInnerDeg, 0.2f, 0.0f, 89.0f, "%.1f")) lc = true;
+                if (selected->spotInnerDeg > selected->spotOuterDeg)
+                    selected->spotInnerDeg = selected->spotOuterDeg;
+            }
+
+            if (lc) m_sceneDirty = true;
+            ImGui::Unindent();
+        }
 
         if (selected->type == PrimitiveType::Model) {
             ImGui::Separator();
@@ -1724,7 +2040,8 @@ void EditorUI::RenderInspector() {
     }
     else {
         ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "No object selected");
-        ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 1.0f), "Select an object in the Scene Objects panel");
+        ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 1.0f),
+                           "Select an object in the Scene Objects panel");
     }
 
     ImGui::End();
@@ -1834,40 +2151,86 @@ bool EditorUI::SaveCurrentScene() {
     return true;
 }
 
+void EditorUI::RequestClose() {
+    // Explicit close (custom X / Exit menu): set during a frame, so we can't
+    // rely on the top-of-frame should-close intercept (the main loop would exit
+    // first). Decide here: prompt if dirty, otherwise close.
+    if (m_sceneDirty) m_showUnsavedChangesDialog = true;
+    else              glfwSetWindowShouldClose(m_window, 1);
+}
+
 void EditorUI::RenderUnsavedChangesDialog() {
     if (m_showUnsavedChangesDialog)
-        ImGui::OpenPopup("РќРµСЃРѕС…СЂР°РЅС‘РЅРЅС‹Рµ РёР·РјРµРЅРµРЅРёСЏ");
+        ImGui::OpenPopup("Unsaved Changes");
 
     ImVec2 center = ImGui::GetMainViewport()->GetCenter();
     ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(500.0f, 230.0f), ImGuiCond_Always);
 
-    if (ImGui::BeginPopupModal("РќРµСЃРѕС…СЂР°РЅС‘РЅРЅС‹Рµ РёР·РјРµРЅРµРЅРёСЏ", nullptr,
-            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar)) {
-        ImGui::Text("Р’ СЃС†РµРЅРµ РµСЃС‚СЊ РЅРµСЃРѕС…СЂР°РЅС‘РЅРЅС‹Рµ РёР·РјРµРЅРµРЅРёСЏ.");
-        ImGui::Text("РЎРѕС…СЂР°РЅРёС‚СЊ РїРµСЂРµРґ Р·Р°РєСЂС‹С‚РёРµРј?");
-        ImGui::Separator();
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,  ImVec2(28, 24));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,  6.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,    ImVec2(8, 12));
+
+    if (ImGui::BeginPopupModal("Unsaved Changes", nullptr,
+            ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoTitleBar)) {
+
+        // Centered title
+        ImGui::SetWindowFontScale(1.25f);
+        {
+            const char* title = "Unsaved Changes";
+            float tw = ImGui::CalcTextSize(title).x;
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
+                                 (ImGui::GetContentRegionAvail().x - tw) * 0.5f);
+            ImGui::TextColored(ImVec4(0.95f, 0.95f, 0.97f, 1.0f), "%s", title);
+        }
+        ImGui::SetWindowFontScale(1.0f);
+
         ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.72f, 0.72f, 0.76f, 1.0f),
+            "You have unsaved changes to the scene.");
+        ImGui::TextColored(ImVec4(0.72f, 0.72f, 0.76f, 1.0f),
+            "Do you want to save before closing?");
 
-        if (ImGui::Button("РЎРѕС…СЂР°РЅРёС‚СЊ", ImVec2(110, 0))) {
+        // Push the button row to the bottom of the dialog.
+        const float bw      = 112.0f;
+        const float spacing = ImGui::GetStyle().ItemSpacing.x;
+        float rowLeft = ImGui::GetCursorPosX();
+        float fullW   = ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosY(ImGui::GetWindowHeight() -
+                             ImGui::GetStyle().WindowPadding.y - ImGui::GetFrameHeight());
+
+        // Save — accent (crimson), pinned left
+        ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(192, 54, 76, 255));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(214, 68, 92, 255));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(168, 44, 64, 255));
+        if (ImGui::Button("Save", ImVec2(bw, 0))) {
             if (SaveCurrentScene())
                 glfwSetWindowShouldClose(m_window, 1);
             m_showUnsavedChangesDialog = false;
             ImGui::CloseCurrentPopup();
         }
+        ImGui::PopStyleColor(3);
+
+        // Don't Save + Cancel — pinned right
         ImGui::SameLine();
-        if (ImGui::Button("Р—Р°РєСЂС‹С‚СЊ", ImVec2(110, 0))) {
+        ImGui::SetCursorPosX(rowLeft + fullW - (bw * 2.0f + spacing));
+        if (ImGui::Button("Don't Save", ImVec2(bw, 0))) {
             m_showUnsavedChangesDialog = false;
             ImGui::CloseCurrentPopup();
             glfwSetWindowShouldClose(m_window, 1);
         }
         ImGui::SameLine();
-        if (ImGui::Button("РћС‚РјРµРЅР°", ImVec2(110, 0))) {
+        if (ImGui::Button("Cancel", ImVec2(bw, 0))) {
             m_showUnsavedChangesDialog = false;
             ImGui::CloseCurrentPopup();
         }
 
         ImGui::EndPopup();
     }
+
+    ImGui::PopStyleVar(4);
 }
 
 void EditorUI::AddGameObject(const std::string& name, PrimitiveType type) {

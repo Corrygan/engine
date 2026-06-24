@@ -23,11 +23,48 @@ GraphNode MakeNode(NodeKind kind, int& nextId) {
     switch (kind) {
         case NodeKind::MaterialOutput:
             n.inputs = { inp(PinType::Vec3,"Base Color"), inp(PinType::Float,"Metallic"),
-                         inp(PinType::Float,"Roughness"), inp(PinType::Vec3,"Emissive") };
+                         inp(PinType::Float,"Roughness"), inp(PinType::Vec3,"Emissive"),
+                         inp(PinType::Vec3,"Normal") };
             n.inputs[0].defVec3[0]=0.8f; n.inputs[0].defVec3[1]=0.8f; n.inputs[0].defVec3[2]=0.8f;
             n.inputs[1].defFloat = 0.0f;
             n.inputs[2].defFloat = 0.5f;
             n.inputs[3].defVec3[0]=0.0f; n.inputs[3].defVec3[1]=0.0f; n.inputs[3].defVec3[2]=0.0f;
+            n.inputs[4].defVec3[0]=0.0f; n.inputs[4].defVec3[1]=0.0f; n.inputs[4].defVec3[2]=1.0f;
+            break;
+        case NodeKind::NormalMap:
+            n.inputs  = { inp(PinType::Vec2,"UV") };
+            n.outputs = { out(PinType::Vec3,"Normal") };
+            break;
+        case NodeKind::Time:
+            n.outputs = { out(PinType::Float,"Time") };
+            break;
+        case NodeKind::Fresnel:
+            n.inputs  = { inp(PinType::Float,"Power") };
+            n.inputs[0].defFloat = 5.0f;
+            n.outputs = { out(PinType::Float,"Fresnel") };
+            break;
+        case NodeKind::Panner:
+            n.inputs  = { inp(PinType::Vec2,"UV"), inp(PinType::Float,"Speed X"),
+                          inp(PinType::Float,"Speed Y") };
+            n.inputs[1].defFloat = 0.1f;
+            n.outputs = { out(PinType::Vec2,"UV") };
+            break;
+        case NodeKind::Rotator:
+            n.inputs  = { inp(PinType::Vec2,"UV"), inp(PinType::Float,"Angle") };
+            n.outputs = { out(PinType::Vec2,"UV") };
+            break;
+        case NodeKind::Remap:
+            n.inputs  = { inp(PinType::Float,"Value"), inp(PinType::Float,"In Min"),
+                          inp(PinType::Float,"In Max"), inp(PinType::Float,"Out Min"),
+                          inp(PinType::Float,"Out Max") };
+            n.inputs[2].defFloat = 1.0f;
+            n.inputs[4].defFloat = 1.0f;
+            n.outputs = { out(PinType::Float,"Result") };
+            break;
+        case NodeKind::NormalStrength:
+            n.inputs  = { inp(PinType::Vec3,"Normal"), inp(PinType::Float,"Strength") };
+            n.inputs[1].defFloat = 1.0f;
+            n.outputs = { out(PinType::Vec3,"Normal") };
             break;
         case NodeKind::Color:
             n.outputs = { out(PinType::Vec3,"Color") };
@@ -96,6 +133,13 @@ const char* GraphNode::Title() const {
         case NodeKind::Clamp:          return "Clamp";
         case NodeKind::SplitRGB:       return "Split RGB";
         case NodeKind::MakeRGB:        return "Make RGB";
+        case NodeKind::NormalMap:      return "Normal Map";
+        case NodeKind::Time:           return "Time";
+        case NodeKind::Fresnel:        return "Fresnel";
+        case NodeKind::Panner:         return "Panner";
+        case NodeKind::Rotator:        return "Rotator";
+        case NodeKind::Remap:          return "Remap";
+        case NodeKind::NormalStrength: return "Normal Strength";
         case NodeKind::MaterialOutput: return "Material Output";
     }
     return "Unknown";
@@ -166,6 +210,13 @@ static const char* KindToStr(NodeKind k) {
         case NodeKind::Clamp:          return "Clamp";
         case NodeKind::SplitRGB:       return "SplitRGB";
         case NodeKind::MakeRGB:        return "MakeRGB";
+        case NodeKind::NormalMap:      return "NormalMap";
+        case NodeKind::Time:           return "Time";
+        case NodeKind::Fresnel:        return "Fresnel";
+        case NodeKind::Panner:         return "Panner";
+        case NodeKind::Rotator:        return "Rotator";
+        case NodeKind::Remap:          return "Remap";
+        case NodeKind::NormalStrength: return "NormalStrength";
         case NodeKind::MaterialOutput: return "MaterialOutput";
     }
     return "Float";
@@ -183,6 +234,13 @@ static NodeKind StrToKind(const std::string& s) {
     if (s == "Clamp")          return NodeKind::Clamp;
     if (s == "SplitRGB")       return NodeKind::SplitRGB;
     if (s == "MakeRGB")        return NodeKind::MakeRGB;
+    if (s == "NormalMap")      return NodeKind::NormalMap;
+    if (s == "Time")           return NodeKind::Time;
+    if (s == "Fresnel")        return NodeKind::Fresnel;
+    if (s == "Panner")         return NodeKind::Panner;
+    if (s == "Rotator")        return NodeKind::Rotator;
+    if (s == "Remap")          return NodeKind::Remap;
+    if (s == "NormalStrength") return NodeKind::NormalStrength;
     if (s == "MaterialOutput") return NodeKind::MaterialOutput;
     return NodeKind::Float;
 }
@@ -200,6 +258,7 @@ bool MaterialGraph::Save(const std::string& graphPath) const {
             case NodeKind::Float:
                 f << " " << n.floatVal; break;
             case NodeKind::Texture2D:
+            case NodeKind::NormalMap:
                 f << " " << (n.texPath.empty() ? "none" : n.texPath); break;
             default: break;
         }
@@ -243,7 +302,8 @@ bool MaterialGraph::Load(const std::string& graphPath) {
                 } break;
                 case NodeKind::Float:
                     ss >> n.floatVal; break;
-                case NodeKind::Texture2D: {
+                case NodeKind::Texture2D:
+                case NodeKind::NormalMap: {
                     // Path may contain spaces — take the rest of the line.
                     std::string p; std::getline(ss, p);
                     size_t s = p.find_first_not_of(" \t");

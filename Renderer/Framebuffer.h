@@ -3,7 +3,7 @@
 
 class Framebuffer {
 public:
-    Framebuffer(int width, int height);
+    Framebuffer(int width, int height, bool hdr = false);
     ~Framebuffer();
 
     void Bind();
@@ -24,4 +24,5 @@ private:
     uint32_t m_depthTexture = 0;
     int m_width = 0;
     int m_height = 0;
+    bool m_hdr = false;
 };

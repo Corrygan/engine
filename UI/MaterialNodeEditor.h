@@ -18,9 +18,11 @@ public:
     void Render();
     bool IsOpen() const { return m_open; }
 
-    // Compile + register graph for matPath without opening the editor UI
-    // Used when material is assigned to object and .graph file exists
-    void EnsureCompiled(const std::string& matPath, SceneRenderer* sr);
+    // Compile + register graph for matPath without opening the editor UI.
+    // Used when a material is assigned to an object or scanned in the browser.
+    // If `preview` is given, also refreshes that material's cached thumbnail.
+    void EnsureCompiled(const std::string& matPath, SceneRenderer* sr,
+                        MaterialPreviewRenderer* preview = nullptr);
 
     Shader* GetCompiledShader() const { return m_compiledShader; }
     const std::string& GetMatPath() const { return m_matPath; }
@@ -51,6 +53,8 @@ private:
     MaterialGraph     m_graph;
 
     int               m_selectedNode  = -1;
+    int               m_ctxNode       = -1;   // right-click target (node)
+    int               m_ctxLink       = -1;   // right-click target (link)
 
     // Compilation
     Shader*           m_compiledShader = nullptr;

@@ -201,6 +201,25 @@ uint32_t MaterialPreviewRenderer::RenderWithShader(
     glUniformMatrix4fv(glGetUniformLocation(pid, "uProj"),  1, GL_FALSE, glm::value_ptr(projection));
     glUniform3fv(glGetUniformLocation(pid, "uCamPos"),      1, glm::value_ptr(camPos));
 
+    // The node program is shared with the scene; force neutral preview lighting
+    // (fixed key light, no scene lights, no shadow sampling). Shadow samplers
+    // are pointed at dedicated units so the cube sampler never collides with a
+    // material sampler2D on unit 0.
+    glUniform1i(glGetUniformLocation(pid, "uNumLights"),        0);
+    glUniform1i(glGetUniformLocation(pid, "uShadowLight"),      -1);
+    glUniform1i(glGetUniformLocation(pid, "uPointShadowLight"), -1);
+    glUniform1i(glGetUniformLocation(pid, "uShadowMap"),         7);
+    glUniform1i(glGetUniformLocation(pid, "uPointShadow"),       6);
+    glUniform1f(glGetUniformLocation(pid, "uTime"),             0.0f);
+    glUniform1i(glGetUniformLocation(pid, "uTonemap"),          1);  // preview tonemaps itself
+    // IBL off in the preview; distinct units so cube/2D samplers don't clash on 0.
+    glUniform1i(glGetUniformLocation(pid, "uHasIBL"),           0);
+    glUniform1i(glGetUniformLocation(pid, "uIrradiance"),       8);
+    glUniform1i(glGetUniformLocation(pid, "uPrefilter"),        9);
+    glUniform1i(glGetUniformLocation(pid, "uBrdfLUT"),          10);
+    glUniform1i(glGetUniformLocation(pid, "uSSAOEnabled"),      0);
+    glUniform1i(glGetUniformLocation(pid, "uSSAO"),            11);
+
     int unit = 0;
     for (auto& [uname, texPath] : texBindings) {
         Texture* tex = texPath.empty() ? nullptr : TextureManager::GetOrLoad(texPath);
