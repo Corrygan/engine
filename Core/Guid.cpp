@@ -36,9 +36,10 @@ Guid Guid::FromString(const std::string& str) {
 }
 
 Guid Guid::Generate() {
-    static std::random_device rd;
-    static std::mt19937_64 engine(rd());
-    static std::uniform_int_distribution<uint32_t> dist(0, 255);
+    // thread_local so Generate() is safe to call from job-system workers
+    // (e.g. background asset import) concurrently with the main thread.
+    thread_local std::mt19937_64 engine(std::random_device{}());
+    thread_local std::uniform_int_distribution<uint32_t> dist(0, 255);
 
     Guid guid;
     for (auto& b : guid.bytes) {

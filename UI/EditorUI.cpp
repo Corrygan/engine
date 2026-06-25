@@ -19,6 +19,7 @@
 #include "../Renderer/MaterialPreviewRenderer.h"
 #include "../Renderer/TextureManager.h"
 #include "../Renderer/Picking.h"
+#include "../Jobs/JobSystem.h"
 #include "ImGuizmo.h"
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -335,6 +336,10 @@ bool EditorUI::Initialize(GLFWwindow* window) {
     m_lua             = new LuaScripting();
     m_lua->SetLogCallback([this](const std::string& msg) { LogInfo(msg); });
 
+    jobs::JobSystem::Get().Initialize();
+    LogInfo("Job system: " + std::to_string(jobs::JobSystem::Get().WorkerCount())
+            + " worker threads");
+
     // When a material is renamed in the node editor, re-point objects + UI.
     m_nodeEditor->SetRenameHandler([this](const std::string& oldP, const std::string& newP) {
         for (auto [e, mc] : m_scene.Reg().view<MaterialComponent>().each())
@@ -467,6 +472,7 @@ bool EditorUI::Initialize(GLFWwindow* window) {
 }
 
 void EditorUI::Shutdown() {
+    jobs::JobSystem::Get().Shutdown();   // join workers before tearing subsystems down
     delete m_lua;             m_lua             = nullptr;
     delete m_nodeEditor;      m_nodeEditor      = nullptr;
     delete m_previewRenderer; m_previewRenderer = nullptr;
@@ -485,6 +491,9 @@ void EditorUI::Render() {
         ImGui::ClearActiveID();
     }
     s_wasIconified = isIconified;
+
+    // Run results marshaled back from worker threads (e.g. finished async imports).
+    jobs::JobSystem::Get().RunMainThreadTasks();
 
     if (glfwWindowShouldClose(m_window) && m_sceneDirty) {
         glfwSetWindowShouldClose(m_window, 0);
@@ -876,11 +885,8 @@ void EditorUI::RenderMenuBar() {
         ImGui::Separator();
         if (RMenuItem("Import Model...", nullptr, ImDrawFlags_RoundCornersBottom)) {
             std::string src = OpenModelFileDialog();
-            if (!src.empty()) {
-                std::string emdl = ModelImporter::Import(src);
-                if (!emdl.empty()) AddModelObject(emdl);
-                else LogError("Failed to import model: " + src);
-            }
+            if (!src.empty())
+                ImportModelAsync(src);
         }
         PopupCloseCheck();
         ImGui::EndPopup();
@@ -1184,10 +1190,7 @@ void EditorUI::RenderAssetBrowser() {
             } else if (item.ext == ".emdl") {
                 AddModelObject(item.path);
             } else if (item.ext==".obj"||item.ext==".fbx"||item.ext==".gltf"||item.ext==".glb") {
-                std::string emdl = ModelImporter::Import(item.path);
-                if (!emdl.empty()) AddModelObject(emdl);
-                else LogError("Import failed: " + item.name);
-                m_assetBrowserDirty = true;
+                ImportModelAsync(item.path);
             } else if (item.ext == ".escn") {
                 if (SceneSerializer::Load(item.path, m_scene)) {
                     m_selected = entt::null;
@@ -1267,13 +1270,8 @@ void EditorUI::RenderHierarchy() {
 
     if (ImGui::Button("Add Object")) {
         std::string sourcePath = OpenModelFileDialog();
-        if (!sourcePath.empty()) {
-            std::string emdlPath = ModelImporter::Import(sourcePath);
-            if (!emdlPath.empty())
-                AddModelObject(emdlPath);
-            else
-                LogError("Failed to import model: " + sourcePath);
-        }
+        if (!sourcePath.empty())
+            ImportModelAsync(sourcePath);
     }
     ImGui::SameLine();
     if (ImGui::Button("Delete Selected")) {
@@ -2535,6 +2533,24 @@ void EditorUI::AddModelObject(const std::string& emdlPath) {
 
     m_sceneDirty = true;
     LogSuccess("Model added: " + fullName);
+}
+
+void EditorUI::ImportModelAsync(const std::string& sourcePath) {
+    std::string name = std::filesystem::path(sourcePath).filename().string();
+    LogInfo("Importing in background: " + name);
+    jobs::JobSystem::Get().Submit([this, sourcePath, name]() {
+        // Worker thread: assimp parse + .emdl/.meta write (no GL, no registry).
+        std::string emdl = ModelImporter::Import(sourcePath);
+        // Marshal the result to the main thread (registry write + lazy GL upload).
+        jobs::JobSystem::Get().EnqueueMainThread([this, emdl, name]() {
+            if (!emdl.empty()) {
+                AddModelObject(emdl);
+                m_assetBrowserDirty = true;
+            } else {
+                LogError("Import failed: " + name);
+            }
+        });
+    });
 }
 
 void EditorUI::SelectEntity(entt::entity e) {

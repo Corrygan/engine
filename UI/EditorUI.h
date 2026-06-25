@@ -72,6 +72,7 @@ private:
     void RenderAssetBrowser();
     void RenderEntityNode(entt::entity e);
     entt::entity DuplicateEntity(entt::entity src);
+    void ImportModelAsync(const std::string& sourcePath);   // assimp on a worker, place on main
 
     static constexpr float kViewportToolbarH  = 38.0f;
     static constexpr float kViewportTimelineH = 96.0f;

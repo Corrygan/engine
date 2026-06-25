@@ -105,6 +105,15 @@ add_library(EngineScripting STATIC
 target_link_libraries(EngineScripting PUBLIC EngineScene PRIVATE ${LUA_LIBRARIES} sol2::sol2)
 target_include_directories(EngineScripting PRIVATE ${LUA_INCLUDE_DIR})
 
+# Jobs: CPU worker-thread pool + cooperative wait + main-thread marshaling.
+# Foundational (std threads only); no engine deps beyond the shared includes.
+add_library(EngineJobs STATIC
+    Jobs/JobSystem.cpp
+)
+target_link_libraries(EngineJobs PUBLIC engine_common)
+find_package(Threads REQUIRED)
+target_link_libraries(EngineJobs PUBLIC Threads::Threads)
+
 # ── Editor application ───────────────────────────────────────────────────────
 add_executable(Engine
     main.cpp
@@ -118,6 +127,7 @@ target_link_libraries(Engine PRIVATE
     EngineRenderer
     EngineAssets
     EngineScripting
+    EngineJobs
     imgui
     imnodes
     glad
