@@ -277,6 +277,20 @@ namespace {
         if (auto* c = s.try_get<ScriptComponent>(se))   d.emplace_or_replace<ScriptComponent>(de, *c);
     }
 
+    // Deep-copy every entity (Name + all components) from src into dst, filling
+    // srcToDst with the old->new id remap. Used for undo/redo snapshots.
+    void CloneScene(const Scene& src, Scene& dst,
+                    std::unordered_map<entt::entity, entt::entity>& srcToDst) {
+        dst.Clear();
+        srcToDst.clear();
+        const entt::registry& s = src.Reg();
+        for (entt::entity e : s.view<NameComponent>()) {
+            entt::entity n = dst.Create(s.get<NameComponent>(e).name);
+            CopyEntity(s, e, dst.Reg(), n);
+            srcToDst[e] = n;
+        }
+    }
+
     std::string OpenScriptFileDialog() {
         OPENFILENAMEA ofn{};
         char fileName[MAX_PATH] = "";
@@ -347,7 +361,7 @@ bool EditorUI::Initialize(GLFWwindow* window) {
         if (m_assetBrowserSelected == oldP) m_assetBrowserSelected = newP;
         m_compiledGraphs.erase(oldP);          // re-precompile under the new path
         m_assetBrowserDirty = true;
-        m_sceneDirty = true;
+        MarkDirty();
         LogInfo("Material renamed: " + std::filesystem::path(newP).stem().string());
     });
 
@@ -511,6 +525,17 @@ void EditorUI::Render() {
 
     if (m_nodeEditor) m_nodeEditor->Render();
     RenderUnsavedChangesDialog();
+
+    // Undo/redo: keyboard shortcuts + per-gesture snapshot coalescing. Done at
+    // the end of the frame so ImGui's interaction state reflects this frame.
+    {
+        ImGuiIO& io = ImGui::GetIO();
+        if (io.KeyCtrl && !io.WantTextInput) {
+            if (ImGui::IsKeyPressed(ImGuiKey_Z, false)) { if (io.KeyShift) Redo(); else Undo(); }
+            if (ImGui::IsKeyPressed(ImGuiKey_Y, false)) Redo();
+        }
+    }
+    UpdateUndoCoalescing();
 }
 
 void EditorUI::RenderTitleBar() {
@@ -823,6 +848,7 @@ void EditorUI::RenderMenuBar() {
             m_scene.Clear(); m_objectCounter = 0;
             m_selected = entt::null; m_currentScenePath.clear(); m_sceneDirty = false;
             AddGameObject("Main Camera", PrimitiveType::Camera);
+            ClearUndoHistory();
             LogSuccess("New scene created");
         }
         if (MItem("Open Scene", "Ctrl+O")) {
@@ -831,6 +857,7 @@ void EditorUI::RenderMenuBar() {
                 if (SceneSerializer::Load(path, m_scene)) {
                     m_selected = entt::null;
                     m_currentScenePath = path; m_sceneDirty = false;
+                    ClearUndoHistory();
                     LogSuccess("Scene loaded: " + path);
                 } else { LogError("Failed to load scene: " + path); }
             }
@@ -851,8 +878,8 @@ void EditorUI::RenderMenuBar() {
     MenuBtn("Edit", "##mEdit");
     ImGui::SetNextWindowPos(popupPos, ImGuiCond_Always);
     if (ImGui::BeginPopup("##mEdit", ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar)) {
-        if (RMenuItem("Undo", "Ctrl+Z", ImDrawFlags_RoundCornersTop))    LogInfo("Undo (not implemented)");
-        if (MItem("Redo",     "Ctrl+Y"))                                  LogInfo("Redo (not implemented)");
+        if (RMenuItem("Undo", "Ctrl+Z", ImDrawFlags_RoundCornersTop))    Undo();
+        if (MItem("Redo",     "Ctrl+Y"))                                  Redo();
         ImGui::Separator();
         MItem("Cut",  "Ctrl+X");
         MItem("Copy", "Ctrl+C");
@@ -1196,6 +1223,7 @@ void EditorUI::RenderAssetBrowser() {
                     m_selected = entt::null;
                     m_currentScenePath = item.path;
                     m_sceneDirty = false;
+                    ClearUndoHistory();
                     LogSuccess("Scene loaded: " + item.name);
                 } else {
                     LogError("Failed to load scene: " + item.name);
@@ -1279,7 +1307,7 @@ void EditorUI::RenderHierarchy() {
             std::string name = reg.get<NameComponent>(m_selected).name;
             m_scene.Destroy(m_selected);
             m_selected = entt::null;
-            m_sceneDirty = true;
+            MarkDirty();
             LogInfo("Deleted: " + name);
         }
     }
@@ -1325,7 +1353,7 @@ void EditorUI::RenderEntityNode(entt::entity e) {
             std::string assigned(static_cast<const char*>(p->Data));
             reg.emplace_or_replace<MaterialComponent>(e, MaterialComponent{ assigned });
             if (m_nodeEditor) m_nodeEditor->EnsureCompiled(assigned, m_sceneRenderer);
-            m_sceneDirty = true;
+            MarkDirty();
             LogInfo("Material assigned to " + name);
         }
         ImGui::EndDragDropTarget();
@@ -1334,13 +1362,13 @@ void EditorUI::RenderEntityNode(entt::entity e) {
     if (ImGui::BeginPopupContextItem()) {
         if (ImGui::MenuItem("Duplicate")) {
             DuplicateEntity(e);
-            m_sceneDirty = true;
+            MarkDirty();
             LogInfo("Duplicated: " + name);
         }
         if (ImGui::MenuItem("Delete")) {
             if (m_selected == e) m_selected = entt::null;
             m_scene.Destroy(e);
-            m_sceneDirty = true;
+            MarkDirty();
             LogInfo("Deleted: " + name);
         }
         ImGui::EndPopup();
@@ -1678,7 +1706,7 @@ void EditorUI::RenderViewport() {
                     reg.emplace_or_replace<MaterialComponent>(target, MaterialComponent{ matPath });
                     if (m_nodeEditor) m_nodeEditor->EnsureCompiled(matPath, m_sceneRenderer);
                     m_selected = target;
-                    m_sceneDirty = true;
+                    MarkDirty();
                     namespace fs = std::filesystem;
                     LogInfo("Material \"" + fs::path(matPath).stem().string()
                         + "\" -> " + reg.get<NameComponent>(target).name);
@@ -1837,7 +1865,7 @@ void EditorUI::RenderViewport() {
                     tr.rotation = glm::quat_cast(rotMat);
                 }
             }
-            m_sceneDirty = true;
+            MarkDirty();
         }
     }
 
@@ -1985,7 +2013,7 @@ void EditorUI::RenderInspector() {
                 if (L.innerDeg > L.outerDeg) L.innerDeg = L.outerDeg;
             }
 
-            if (lc) m_sceneDirty = true;
+            if (lc) MarkDirty();
             ImGui::Unindent();
         }
 
@@ -2044,7 +2072,7 @@ void EditorUI::RenderInspector() {
             ImGui::SetCursorPosY(ImGui::GetCursorPosY() - 3.0f);
             if (IconButton(ICON_FA_XMARK, "##detachmat", ImVec2(20.0f, 20.0f))) {
                 reg.remove<MaterialComponent>(selected);
-                m_sceneDirty = true;
+                MarkDirty();
             }
             Material* mat = MaterialManager::GetOrLoad(matPath);
             if (mat) {
@@ -2206,7 +2234,7 @@ void EditorUI::RenderInspector() {
                 ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "File not found");
                 if (ImGui::Button("Clear")) {
                     reg.remove<MaterialComponent>(selected);
-                    m_sceneDirty = true;
+                    MarkDirty();
                 }
             }
         }
@@ -2220,7 +2248,7 @@ void EditorUI::RenderInspector() {
         // the user clicked the X this frame (caller removes after using fields).
         auto compHeader = [&](const char* label, bool* enabled) -> bool {
             bool en = *enabled;
-            if (ImGui::Checkbox("##en", &en)) { *enabled = en; m_sceneDirty = true; }
+            if (ImGui::Checkbox("##en", &en)) { *enabled = en; MarkDirty(); }
             ImGui::SameLine();
             ImGui::Text("%s", label);
             ImGui::SameLine(ImGui::GetContentRegionMax().x - 22.0f);
@@ -2233,14 +2261,14 @@ void EditorUI::RenderInspector() {
             if (!remove) {
                 ImGui::TextDisabled("Axis");
                 ImGui::SetNextItemWidth(-1);
-                if (ImGui::DragFloat3("##axis", glm::value_ptr(r->axis), 0.01f, -1.0f, 1.0f, "%.2f")) m_sceneDirty = true;
+                if (ImGui::DragFloat3("##axis", glm::value_ptr(r->axis), 0.01f, -1.0f, 1.0f, "%.2f")) MarkDirty();
                 ImGui::TextDisabled("Speed (deg/s)");
                 ImGui::SetNextItemWidth(-1);
-                if (ImGui::DragFloat("##spd", &r->speed, 0.5f, -720.0f, 720.0f, "%.1f")) m_sceneDirty = true;
+                if (ImGui::DragFloat("##spd", &r->speed, 0.5f, -720.0f, 720.0f, "%.1f")) MarkDirty();
             }
             ImGui::Spacing();
             ImGui::PopID();
-            if (remove) { reg.remove<RotatorComponent>(selected); m_sceneDirty = true; }
+            if (remove) { reg.remove<RotatorComponent>(selected); MarkDirty(); }
         }
 
         if (auto* f = reg.try_get<FloaterComponent>(selected)) {
@@ -2249,17 +2277,17 @@ void EditorUI::RenderInspector() {
             if (!remove) {
                 ImGui::TextDisabled("Axis");
                 ImGui::SetNextItemWidth(-1);
-                if (ImGui::DragFloat3("##axis", glm::value_ptr(f->axis), 0.01f, -1.0f, 1.0f, "%.2f")) m_sceneDirty = true;
+                if (ImGui::DragFloat3("##axis", glm::value_ptr(f->axis), 0.01f, -1.0f, 1.0f, "%.2f")) MarkDirty();
                 ImGui::TextDisabled("Speed (rad/s)");
                 ImGui::SetNextItemWidth(-1);
-                if (ImGui::DragFloat("##spd", &f->speed, 0.5f, -720.0f, 720.0f, "%.1f")) m_sceneDirty = true;
+                if (ImGui::DragFloat("##spd", &f->speed, 0.5f, -720.0f, 720.0f, "%.1f")) MarkDirty();
                 ImGui::TextDisabled("Amplitude");
                 ImGui::SetNextItemWidth(-1);
-                if (ImGui::DragFloat("##amp", &f->amount, 0.01f, 0.0f, 100.0f, "%.2f")) m_sceneDirty = true;
+                if (ImGui::DragFloat("##amp", &f->amount, 0.01f, 0.0f, 100.0f, "%.2f")) MarkDirty();
             }
             ImGui::Spacing();
             ImGui::PopID();
-            if (remove) { reg.remove<FloaterComponent>(selected); m_sceneDirty = true; }
+            if (remove) { reg.remove<FloaterComponent>(selected); MarkDirty(); }
         }
 
         if (auto* s = reg.try_get<ScriptComponent>(selected)) {
@@ -2277,30 +2305,30 @@ void EditorUI::RenderInspector() {
                         std::string relStr = ec ? "" : rel.generic_string();
                         s->path = (!relStr.empty() && relStr.rfind("..", 0) != 0) ? relStr : p;
                         for (auto& ch : s->path) if (ch == '\\') ch = '/';
-                        m_sceneDirty = true;
+                        MarkDirty();
                     }
                 }
                 if (!s->path.empty() &&
                     ImGui::Button(ICON_FA_XMARK "  Clear##scr", ImVec2(-1, 0))) {
-                    s->path.clear(); m_sceneDirty = true;
+                    s->path.clear(); MarkDirty();
                 }
             }
             ImGui::Spacing();
             ImGui::PopID();
-            if (remove) { reg.remove<ScriptComponent>(selected); m_sceneDirty = true; }
+            if (remove) { reg.remove<ScriptComponent>(selected); MarkDirty(); }
         }
 
         if (ImGui::Button(ICON_FA_PLUS "  Add Component", ImVec2(-1, 0)))
             ImGui::OpenPopup("##addcomp");
         if (ImGui::BeginPopup("##addcomp")) {
             if (!reg.all_of<RotatorComponent>(selected) && ImGui::MenuItem("Rotator")) {
-                reg.emplace<RotatorComponent>(selected); m_sceneDirty = true;
+                reg.emplace<RotatorComponent>(selected); MarkDirty();
             }
             if (!reg.all_of<FloaterComponent>(selected) && ImGui::MenuItem("Floater")) {
-                reg.emplace<FloaterComponent>(selected); m_sceneDirty = true;
+                reg.emplace<FloaterComponent>(selected); MarkDirty();
             }
             if (!reg.all_of<ScriptComponent>(selected) && ImGui::MenuItem("Script")) {
-                reg.emplace<ScriptComponent>(selected); m_sceneDirty = true;
+                reg.emplace<ScriptComponent>(selected); MarkDirty();
             }
             ImGui::EndPopup();
         }
@@ -2342,7 +2370,7 @@ void EditorUI::RenderTransformEditor(entt::entity e) {
     float pos[3] = { tr.position.x, tr.position.y, tr.position.z };
     if (XYZRow("Position", pos, 0.1f, -1e6f, 1e6f, "%.2f")) {
         tr.position = glm::vec3(pos[0], pos[1], pos[2]);
-        m_sceneDirty = true;
+        MarkDirty();
     }
 
     ImGui::Spacing();
@@ -2351,7 +2379,7 @@ void EditorUI::RenderTransformEditor(entt::entity e) {
     float eulerArr[3] = { euler.x, euler.y, euler.z };
     if (XYZRow("Rotation", eulerArr, 0.5f, -360.0f, 360.0f, "%.1f")) {
         tr.rotation = glm::quat(glm::radians(glm::vec3(eulerArr[0], eulerArr[1], eulerArr[2])));
-        m_sceneDirty = true;
+        MarkDirty();
     }
 
     ImGui::Spacing();
@@ -2359,7 +2387,7 @@ void EditorUI::RenderTransformEditor(entt::entity e) {
     float scl[3] = { tr.scale.x, tr.scale.y, tr.scale.z };
     if (XYZRow("Scale", scl, 0.05f, 0.001f, 1e4f, "%.3f")) {
         tr.scale = glm::vec3(scl[0], scl[1], scl[2]);
-        m_sceneDirty = true;
+        MarkDirty();
     }
 }
 
@@ -2421,6 +2449,73 @@ bool EditorUI::SaveCurrentScene() {
     m_sceneDirty = false;
     LogSuccess("Scene saved: " + path);
     return true;
+}
+
+// ── Undo/redo ───────────────────────────────────────────────────────────────
+void EditorUI::MarkDirty() {
+    m_sceneDirty = true;
+    ++m_sceneRevision;
+}
+
+SceneSnapshot EditorUI::CaptureSnapshot() {
+    SceneSnapshot snap;
+    std::unordered_map<entt::entity, entt::entity> map;
+    CloneScene(m_scene, snap.scene, map);
+    auto it = map.find(m_selected);
+    snap.selected = (m_scene.Valid(m_selected) && it != map.end()) ? it->second : entt::null;
+    return snap;
+}
+
+void EditorUI::RestoreSnapshot(const SceneSnapshot& snap) {
+    std::unordered_map<entt::entity, entt::entity> map;
+    CloneScene(snap.scene, m_scene, map);
+    auto it = map.find(snap.selected);
+    m_selected = (it != map.end()) ? it->second : entt::null;
+}
+
+void EditorUI::CommitEdit() {
+    m_undoStack.push_back(std::move(m_baseline));
+    if (m_undoStack.size() > kMaxUndo) m_undoStack.erase(m_undoStack.begin());
+    m_redoStack.clear();
+    m_baseline         = CaptureSnapshot();
+    m_baselineRevision = m_sceneRevision;
+}
+
+void EditorUI::UpdateUndoCoalescing() {
+    // A gesture (drag, gizmo, button press) keeps an item active; once it ends
+    // and the scene revision moved, commit exactly one undo step for it.
+    const bool interacting = ImGui::IsAnyItemActive() || ImGuizmo::IsUsing();
+    if (!interacting && m_sceneRevision != m_baselineRevision)
+        CommitEdit();
+}
+
+void EditorUI::Undo() {
+    if (m_undoStack.empty()) { LogInfo("Nothing to undo"); return; }
+    m_redoStack.push_back(std::move(m_baseline));   // current settled state -> redo
+    RestoreSnapshot(m_undoStack.back());
+    m_undoStack.pop_back();
+    m_baseline         = CaptureSnapshot();
+    m_baselineRevision = m_sceneRevision;           // keep equal: no spurious commit
+    m_sceneDirty       = true;
+    LogInfo("Undo");
+}
+
+void EditorUI::Redo() {
+    if (m_redoStack.empty()) { LogInfo("Nothing to redo"); return; }
+    m_undoStack.push_back(std::move(m_baseline));
+    RestoreSnapshot(m_redoStack.back());
+    m_redoStack.pop_back();
+    m_baseline         = CaptureSnapshot();
+    m_baselineRevision = m_sceneRevision;
+    m_sceneDirty       = true;
+    LogInfo("Redo");
+}
+
+void EditorUI::ClearUndoHistory() {
+    m_undoStack.clear();
+    m_redoStack.clear();
+    m_baseline         = CaptureSnapshot();
+    m_baselineRevision = m_sceneRevision;
 }
 
 void EditorUI::RequestClose() {
@@ -2515,7 +2610,7 @@ void EditorUI::AddGameObject(const std::string& name, PrimitiveType type) {
     else if (type == PrimitiveType::Light)  reg.emplace<LightComponent>(e);
     else if (type == PrimitiveType::Camera) reg.emplace<CameraComponent>(e);
 
-    m_sceneDirty = true;
+    MarkDirty();
     LogInfo("Created: " + fullName);
 }
 
@@ -2531,7 +2626,7 @@ void EditorUI::AddModelObject(const std::string& emdlPath) {
     if (ModelMesh::ReadAabb(emdlPath, mn, mx)) { mc.aabbMin = mn; mc.aabbMax = mx; }
     m_scene.Reg().emplace<MeshComponent>(e, mc);
 
-    m_sceneDirty = true;
+    MarkDirty();
     LogSuccess("Model added: " + fullName);
 }
 

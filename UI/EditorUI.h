@@ -10,6 +10,7 @@
 #include <vector>
 #include <unordered_set>
 #include <unordered_map>
+#include <cstdint>
 #include "../Scene/Scene.h"
 #include "../Renderer/EditorCamera.h"
 
@@ -31,6 +32,13 @@ struct ConsoleMessage {
 };
 
 enum class PlayState { Editing, Playing, Paused };
+
+// One undo/redo entry: a deep clone of the scene plus the selected entity
+// (expressed in the snapshot's own id space).
+struct SceneSnapshot {
+    Scene        scene;
+    entt::entity selected = entt::null;
+};
 
 class EditorUI {
 public:
@@ -82,6 +90,16 @@ private:
     void AddConsoleMessage(const std::string& message, ConsoleMessage::Type type);
     bool SaveCurrentScene();
 
+    // Undo/redo — snapshot transactions with per-gesture coalescing.
+    void          MarkDirty();             // registry changed: set dirty + bump revision
+    void          Undo();
+    void          Redo();
+    void          ClearUndoHistory();
+    void          UpdateUndoCoalescing();  // once per frame: commit a step when a gesture ends
+    void          CommitEdit();            // push the baseline as an undo step, refresh baseline
+    SceneSnapshot CaptureSnapshot();
+    void          RestoreSnapshot(const SceneSnapshot& snap);
+
 private:
     GLFWwindow* m_window = nullptr;
     SceneRenderer* m_sceneRenderer = nullptr;
@@ -122,6 +140,14 @@ private:
     Scene                   m_playBackup;          // full snapshot, restored on Stop
     std::unordered_map<entt::entity, entt::entity> m_playMap;   // live entity → backup entity
     float                   m_playTime = 0.0f;
+
+    // Undo/redo
+    std::vector<SceneSnapshot> m_undoStack;
+    std::vector<SceneSnapshot> m_redoStack;
+    SceneSnapshot              m_baseline;             // last settled state (pre-edit reference)
+    uint64_t                   m_sceneRevision    = 0; // bumped by MarkDirty()
+    uint64_t                   m_baselineRevision = 0;
+    static constexpr size_t    kMaxUndo           = 64;
 
     MaterialPreviewRenderer* m_previewRenderer = nullptr;
     MaterialNodeEditor*      m_nodeEditor      = nullptr;
