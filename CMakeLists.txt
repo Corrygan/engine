@@ -8,20 +8,68 @@ project(Engine LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# ── Third-party packages ────────────────────────────────────────────────────
+find_package(OpenGL REQUIRED)
+find_package(assimp CONFIG REQUIRED)
+find_package(Lua REQUIRED)
+find_package(sol2 CONFIG REQUIRED)
+find_package(EnTT CONFIG REQUIRED)
+
 set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/imgui)
 
-add_executable(Engine
-    main.cpp
-    UI/EditorUI.cpp
-    UI/MaterialNodeEditor.cpp
+if (MSVC)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+endif()
 
+# ── Third-party static libraries ────────────────────────────────────────────
+# glad — OpenGL function loader.
+add_library(glad STATIC glad/src/gl.c)
+target_include_directories(glad PUBLIC ${CMAKE_SOURCE_DIR}/glad/include)
+
+# Dear ImGui + GLFW/OpenGL3 backends + ImGuizmo.
+add_library(imgui STATIC
+    ${IMGUI_DIR}/imgui.cpp
+    ${IMGUI_DIR}/imgui_draw.cpp
+    ${IMGUI_DIR}/imgui_widgets.cpp
+    ${IMGUI_DIR}/imgui_tables.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
+    ${IMGUI_DIR}/ImGuizmo.cpp
+)
+target_include_directories(imgui PUBLIC
+    ${IMGUI_DIR}
+    ${IMGUI_DIR}/backends
+    ${CMAKE_SOURCE_DIR}/lib/include/GLFW          # imgui_impl_glfw.cpp -> <glfw3.h>
+)
+
+# imnodes — node canvas (used by the material node editor).
+add_library(imnodes STATIC imnodes/imnodes.cpp)
+target_include_directories(imnodes PUBLIC ${CMAKE_SOURCE_DIR}/imnodes)
+target_link_libraries(imnodes PUBLIC imgui)
+
+# Shared header-only conveniences for the engine libs: the source root (so both
+# "../X/Y.h" and "X/Y.h" includes resolve) and GLM.
+add_library(engine_common INTERFACE)
+target_include_directories(engine_common INTERFACE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/glm
+)
+
+# ── Engine libraries (layered: each depends only on the ones above it) ───────
+# Core: ids, math/util helpers. No OpenGL, no ImGui.
+add_library(EngineCore STATIC
     Core/Guid.cpp
-    Scene/Scene.cpp
-    Assets/MetaFile.cpp
-    Assets/AssetDatabase.cpp
-    Assets/SceneSerializer.cpp
-    Assets/ModelImporter.cpp
+)
+target_link_libraries(EngineCore PUBLIC engine_common)
 
+# Scene: the EnTT registry + components.
+add_library(EngineScene STATIC
+    Scene/Scene.cpp
+)
+target_link_libraries(EngineScene PUBLIC EngineCore EnTT::EnTT)
+
+# Renderer: GL rendering, meshes, materials, post-processing.
+add_library(EngineRenderer STATIC
     Renderer/Framebuffer.cpp
     Renderer/Shader.cpp
     Renderer/Mesh.cpp
@@ -38,60 +86,47 @@ add_executable(Engine
     Renderer/MaterialGraph.cpp
     Renderer/NodeCompiler.cpp
     Renderer/EnvironmentMap.cpp
+)
+target_link_libraries(EngineRenderer PUBLIC EngineScene glad OpenGL::GL)
 
+# Assets: import + serialization (asset database, meta files, scenes, models).
+add_library(EngineAssets STATIC
+    Assets/MetaFile.cpp
+    Assets/AssetDatabase.cpp
+    Assets/SceneSerializer.cpp
+    Assets/ModelImporter.cpp
+)
+target_link_libraries(EngineAssets PUBLIC EngineScene PRIVATE assimp::assimp)
+
+# Scripting: Lua runtime (sol2 hidden behind a pimpl).
+add_library(EngineScripting STATIC
     Scripting/LuaScripting.cpp
-
-    imnodes/imnodes.cpp
-
-    glad/src/gl.c
-
-    ${IMGUI_DIR}/imgui.cpp
-    ${IMGUI_DIR}/imgui_draw.cpp
-    ${IMGUI_DIR}/imgui_widgets.cpp
-    ${IMGUI_DIR}/imgui_tables.cpp
-    ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
-    ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
-    ${IMGUI_DIR}/ImGuizmo.cpp
 )
+target_link_libraries(EngineScripting PUBLIC EngineScene PRIVATE ${LUA_LIBRARIES} sol2::sol2)
+target_include_directories(EngineScripting PRIVATE ${LUA_INCLUDE_DIR})
 
-target_include_directories(Engine PRIVATE
-    .
-    UI
-    glad/include
-    glm
-    ${IMGUI_DIR}
-    ${IMGUI_DIR}/backends
-    ${CMAKE_SOURCE_DIR}/lib/include/GLFW
-    ${CMAKE_SOURCE_DIR}/imnodes
+# ── Editor application ───────────────────────────────────────────────────────
+add_executable(Engine
+    main.cpp
+    UI/EditorUI.cpp
+    UI/MaterialNodeEditor.cpp
 )
-
-find_package(OpenGL REQUIRED)
-find_package(assimp CONFIG REQUIRED)
-find_package(Lua REQUIRED)
-find_package(sol2 CONFIG REQUIRED)
-find_package(EnTT CONFIG REQUIRED)
-
-target_include_directories(Engine PRIVATE ${LUA_INCLUDE_DIR})
-
+target_include_directories(Engine PRIVATE ${CMAKE_SOURCE_DIR}/UI)
 target_link_libraries(Engine PRIVATE
+    EngineCore
+    EngineScene
+    EngineRenderer
+    EngineAssets
+    EngineScripting
+    imgui
+    imnodes
+    glad
     ${CMAKE_SOURCE_DIR}/lib/lib/glfw3.lib
     OpenGL::GL
-    assimp::assimp
-    ${LUA_LIBRARIES}
-    sol2::sol2
-    EnTT::EnTT
     Comdlg32
     Shell32
 )
-
-if (MSVC)
-    target_compile_definitions(Engine PRIVATE _CRT_SECURE_NO_WARNINGS)
-endif()
-
-target_compile_definitions(Engine PRIVATE
-    ENGINE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
-)
-
+target_compile_definitions(Engine PRIVATE ENGINE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 set_target_properties(Engine PROPERTIES
     VS_DEBUGGER_WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
