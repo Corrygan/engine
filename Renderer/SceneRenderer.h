@@ -5,7 +5,7 @@
 #include <unordered_map>
 #include <utility>
 #include <glm/glm.hpp>
-#include "../Scene/GameObject.h"
+#include "../Scene/Scene.h"
 
 class Framebuffer;
 class Shader;
@@ -27,7 +27,7 @@ public:
     SceneRenderer();
     ~SceneRenderer();
 
-    uint32_t Render(const std::vector<GameObject>& objects, int selectedIndex,
+    uint32_t Render(Scene& scene, entt::entity selected,
         int width, int height,
         const glm::mat4& view, const glm::mat4& projection);
 
@@ -73,15 +73,15 @@ public:
     float GetSSRIntensity() const { return m_ssrIntensity; }
 
 private:
-    PrimitiveMesh* GetMeshForType(PrimitiveType type) const;
+    PrimitiveMesh* GetMeshForKind(MeshKind kind) const;
     ModelMesh*     GetOrLoadModel(const std::string& emdlPath);
-    void           RenderShadowPass(const std::vector<GameObject>& objects);
-    void           RenderPointShadowPass(const std::vector<GameObject>& objects,
+    void           RenderShadowPass(Scene& scene);
+    void           RenderPointShadowPass(Scene& scene,
                                          const glm::vec3& lightPos, float farPlane);
     void           EnsureBloomTargets(int width, int height);
     void           RenderBloom();   // bright-pass + blur into m_bloomTex[0]
     void           EnsureGBuffer(int width, int height);
-    void           RenderGBuffer(const std::vector<GameObject>& objects,
+    void           RenderGBuffer(Scene& scene,
                                  const glm::mat4& view, const glm::mat4& projection);
     void           RenderSSAO(const glm::mat4& projection);
     void           RenderSSR(const glm::mat4& projection);

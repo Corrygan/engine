@@ -10,6 +10,7 @@
 #include "imgui_internal.h"
 #include "../Assets/SceneSerializer.h"
 #include "../Assets/AssetDatabase.h"
+#include "../Scripting/LuaScripting.h"
 #include "../Assets/ModelImporter.h"
 #include "../Renderer/SceneRenderer.h"
 #include "../Renderer/ModelMesh.h"
@@ -18,7 +19,6 @@
 #include "../Renderer/MaterialPreviewRenderer.h"
 #include "../Renderer/TextureManager.h"
 #include "../Renderer/Picking.h"
-#include "../Scene/Transform.h"
 #include "ImGuizmo.h"
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -261,6 +261,33 @@ namespace {
         return GetOpenFileNameA(&ofn) ? std::string(fileName) : "";
     }
 
+    // Copy every component (except Name, set at create time) from one entity to
+    // another — possibly across registries. Used for Duplicate and the play-mode
+    // snapshot. Both src and dst already have Name + Transform (via Scene::Create).
+    void CopyEntity(const entt::registry& s, entt::entity se,
+                    entt::registry& d, entt::entity de) {
+        d.get<TransformComponent>(de) = s.get<TransformComponent>(se);
+        if (auto* c = s.try_get<MeshComponent>(se))     d.emplace_or_replace<MeshComponent>(de, *c);
+        if (auto* c = s.try_get<MaterialComponent>(se)) d.emplace_or_replace<MaterialComponent>(de, *c);
+        if (auto* c = s.try_get<LightComponent>(se))    d.emplace_or_replace<LightComponent>(de, *c);
+        if (auto* c = s.try_get<CameraComponent>(se))   d.emplace_or_replace<CameraComponent>(de, *c);
+        if (auto* c = s.try_get<RotatorComponent>(se))  d.emplace_or_replace<RotatorComponent>(de, *c);
+        if (auto* c = s.try_get<FloaterComponent>(se))  d.emplace_or_replace<FloaterComponent>(de, *c);
+        if (auto* c = s.try_get<ScriptComponent>(se))   d.emplace_or_replace<ScriptComponent>(de, *c);
+    }
+
+    std::string OpenScriptFileDialog() {
+        OPENFILENAMEA ofn{};
+        char fileName[MAX_PATH] = "";
+        ofn.lStructSize  = sizeof(ofn);
+        ofn.lpstrFile    = fileName;
+        ofn.nMaxFile     = MAX_PATH;
+        ofn.lpstrFilter  = "Lua Scripts\0*.lua\0All Files\0*.*\0";
+        ofn.nFilterIndex = 1;
+        ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
+        return GetOpenFileNameA(&ofn) ? std::string(fileName) : "";
+    }
+
     std::string OpenSceneFileDialog() {
         OPENFILENAMEA ofn{};
         char fileName[MAX_PATH] = "";
@@ -305,11 +332,13 @@ bool EditorUI::Initialize(GLFWwindow* window) {
     m_sceneRenderer   = new SceneRenderer();
     m_previewRenderer = new MaterialPreviewRenderer();
     m_nodeEditor      = new MaterialNodeEditor();
+    m_lua             = new LuaScripting();
+    m_lua->SetLogCallback([this](const std::string& msg) { LogInfo(msg); });
 
     // When a material is renamed in the node editor, re-point objects + UI.
     m_nodeEditor->SetRenameHandler([this](const std::string& oldP, const std::string& newP) {
-        for (auto& obj : m_gameObjects)
-            if (obj.materialPath == oldP) obj.materialPath = newP;
+        for (auto [e, mc] : m_scene.Reg().view<MaterialComponent>().each())
+            if (mc.path == oldP) mc.path = newP;
         if (m_assetBrowserSelected == oldP) m_assetBrowserSelected = newP;
         m_compiledGraphs.erase(oldP);          // re-precompile under the new path
         m_assetBrowserDirty = true;
@@ -438,6 +467,7 @@ bool EditorUI::Initialize(GLFWwindow* window) {
 }
 
 void EditorUI::Shutdown() {
+    delete m_lua;             m_lua             = nullptr;
     delete m_nodeEditor;      m_nodeEditor      = nullptr;
     delete m_previewRenderer; m_previewRenderer = nullptr;
     delete m_sceneRenderer;   m_sceneRenderer   = nullptr;
@@ -460,6 +490,8 @@ void EditorUI::Render() {
         glfwSetWindowShouldClose(m_window, 0);
         m_showUnsavedChangesDialog = true;
     }
+
+    UpdatePlayMode();
 
     RenderDockspace();
     RenderHierarchy();
@@ -779,18 +811,16 @@ void EditorUI::RenderMenuBar() {
     ImGui::SetNextWindowPos(popupPos, ImGuiCond_Always);
     if (ImGui::BeginPopup("##mFile", ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar)) {
         if (RMenuItem("New Scene",        "Ctrl+N",        ImDrawFlags_RoundCornersTop)) {
-            m_gameObjects.clear(); m_objectCounter = 0;
-            m_selectedObjectIndex = -1; m_currentScenePath.clear(); m_sceneDirty = false;
+            m_scene.Clear(); m_objectCounter = 0;
+            m_selected = entt::null; m_currentScenePath.clear(); m_sceneDirty = false;
             AddGameObject("Main Camera", PrimitiveType::Camera);
             LogSuccess("New scene created");
         }
         if (MItem("Open Scene", "Ctrl+O")) {
             std::string path = OpenSceneFileDialog();
             if (!path.empty()) {
-                std::vector<GameObject> loaded;
-                if (SceneSerializer::Load(path, loaded)) {
-                    m_gameObjects = std::move(loaded);
-                    m_selectedObjectIndex = -1;
+                if (SceneSerializer::Load(path, m_scene)) {
+                    m_selected = entt::null;
                     m_currentScenePath = path; m_sceneDirty = false;
                     LogSuccess("Scene loaded: " + path);
                 } else { LogError("Failed to load scene: " + path); }
@@ -1159,10 +1189,8 @@ void EditorUI::RenderAssetBrowser() {
                 else LogError("Import failed: " + item.name);
                 m_assetBrowserDirty = true;
             } else if (item.ext == ".escn") {
-                std::vector<GameObject> loaded;
-                if (SceneSerializer::Load(item.path, loaded)) {
-                    m_gameObjects = std::move(loaded);
-                    m_selectedObjectIndex = -1;
+                if (SceneSerializer::Load(item.path, m_scene)) {
+                    m_selected = entt::null;
                     m_currentScenePath = item.path;
                     m_sceneDirty = false;
                     LogSuccess("Scene loaded: " + item.name);
@@ -1224,12 +1252,16 @@ void EditorUI::RenderHierarchy() {
 
     ImGui::Begin("Scene Objects", &m_showHierarchy, ImGuiWindowFlags_NoCollapse);
 
-    ImGui::TextDisabled("%zu objects in scene", m_gameObjects.size());
+    auto& reg = m_scene.Reg();
+    auto  nameView = reg.view<NameComponent>();
+    ImGui::TextDisabled("%zu objects in scene", (size_t)nameView.size());
     ImGui::Separator();
 
-    for (int i = 0; i < (int)m_gameObjects.size(); i++) {
-        RenderGameObjectNode(m_gameObjects[i], i);
-    }
+    // Snapshot ids first: a Delete/Duplicate during iteration would otherwise
+    // mutate the pool we're walking.
+    std::vector<entt::entity> ents(nameView.begin(), nameView.end());
+    for (entt::entity e : ents)
+        if (m_scene.Valid(e)) RenderEntityNode(e);
 
     ImGui::Separator();
 
@@ -1245,10 +1277,10 @@ void EditorUI::RenderHierarchy() {
     }
     ImGui::SameLine();
     if (ImGui::Button("Delete Selected")) {
-        if (m_selectedObjectIndex >= 0 && m_selectedObjectIndex < (int)m_gameObjects.size()) {
-            std::string name = m_gameObjects[m_selectedObjectIndex].name;
-            m_gameObjects.erase(m_gameObjects.begin() + m_selectedObjectIndex);
-            m_selectedObjectIndex = -1;
+        if (m_scene.Valid(m_selected)) {
+            std::string name = reg.get<NameComponent>(m_selected).name;
+            m_scene.Destroy(m_selected);
+            m_selected = entt::null;
             m_sceneDirty = true;
             LogInfo("Deleted: " + name);
         }
@@ -1257,18 +1289,24 @@ void EditorUI::RenderHierarchy() {
     ImGui::End();
 }
 
-void EditorUI::RenderGameObjectNode(GameObject& obj, int index) {
-    bool isSelected = (m_selectedObjectIndex == index);
+void EditorUI::RenderEntityNode(entt::entity e) {
+    entt::registry& reg = m_scene.Reg();
+    std::string name = reg.get<NameComponent>(e).name;   // copy: survives a Delete below
+    const MaterialComponent* matc = reg.try_get<MaterialComponent>(e);
+    std::string matPath = matc ? matc->path : std::string();
 
-    if (ImGui::Selectable(obj.name.c_str(), isSelected)) {
-        SelectGameObject(index);
-        LogInfo("Selected: " + obj.name);
+    ImGui::PushID(static_cast<int>(entt::to_integral(e)));
+
+    bool isSelected = (m_selected == e);
+    if (ImGui::Selectable(name.c_str(), isSelected)) {
+        SelectEntity(e);
+        LogInfo("Selected: " + name);
     }
 
-    if (!obj.materialPath.empty() && m_previewRenderer) {
-        Material* hmat = MaterialManager::GetOrLoad(obj.materialPath);
+    if (!matPath.empty() && m_previewRenderer) {
+        Material* hmat = MaterialManager::GetOrLoad(matPath);
         if (hmat) {
-            uint32_t prev = m_previewRenderer->GetPreview(hmat, obj.materialPath);
+            uint32_t prev = m_previewRenderer->GetPreview(hmat, matPath);
             if (prev) {
                 constexpr float kThumbSz = 16.0f;
                 ImVec2 iMax = ImGui::GetItemRectMax();
@@ -1286,31 +1324,122 @@ void EditorUI::RenderGameObjectNode(GameObject& obj, int index) {
 
     if (ImGui::BeginDragDropTarget()) {
         if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("ASSET_EMAT")) {
-            obj.materialPath = std::string(static_cast<const char*>(p->Data));
-            if (m_nodeEditor) m_nodeEditor->EnsureCompiled(obj.materialPath, m_sceneRenderer);
+            std::string assigned(static_cast<const char*>(p->Data));
+            reg.emplace_or_replace<MaterialComponent>(e, MaterialComponent{ assigned });
+            if (m_nodeEditor) m_nodeEditor->EnsureCompiled(assigned, m_sceneRenderer);
             m_sceneDirty = true;
-            LogInfo("Material assigned to " + obj.name);
+            LogInfo("Material assigned to " + name);
         }
         ImGui::EndDragDropTarget();
     }
 
     if (ImGui::BeginPopupContextItem()) {
         if (ImGui::MenuItem("Duplicate")) {
-            GameObject newObj = obj;
-            newObj.name = obj.name + "_copy";
-            m_gameObjects.push_back(newObj);
+            DuplicateEntity(e);
             m_sceneDirty = true;
-            LogInfo("Duplicated: " + obj.name);
+            LogInfo("Duplicated: " + name);
         }
         if (ImGui::MenuItem("Delete")) {
-            m_gameObjects.erase(m_gameObjects.begin() + index);
-            if (m_selectedObjectIndex == index)
-                m_selectedObjectIndex = -1;
+            if (m_selected == e) m_selected = entt::null;
+            m_scene.Destroy(e);
             m_sceneDirty = true;
-            LogInfo("Deleted: " + obj.name);
+            LogInfo("Deleted: " + name);
         }
         ImGui::EndPopup();
     }
+
+    ImGui::PopID();
+}
+
+entt::entity EditorUI::DuplicateEntity(entt::entity src) {
+    entt::registry& reg = m_scene.Reg();
+    entt::entity e = m_scene.Create(reg.get<NameComponent>(src).name + "_copy");
+    CopyEntity(reg, src, reg, e);
+    return e;
+}
+
+void EditorUI::EnterPlayMode() {
+    if (m_playState != PlayState::Editing) return;
+
+    // Snapshot the whole scene into a parallel registry so Stop restores cleanly.
+    m_playBackup.Clear();
+    m_playMap.clear();
+    entt::registry& reg  = m_scene.Reg();
+    entt::registry& breg = m_playBackup.Reg();
+    for (entt::entity e : reg.view<NameComponent>()) {
+        entt::entity b = m_playBackup.Create(reg.get<NameComponent>(e).name);
+        CopyEntity(reg, e, breg, b);
+        m_playMap[e] = b;
+    }
+
+    m_playTime  = 0.0f;
+    m_playState = PlayState::Playing;
+    if (m_lua) m_lua->StartAll(m_scene);   // run script OnStart
+    LogSuccess("Play mode: started");
+}
+
+void EditorUI::ExitPlayMode() {
+    if (m_playState == PlayState::Editing) return;
+    if (m_lua) m_lua->StopAll();              // run script OnDestroy, clear state
+
+    // Entities are never created/destroyed during play, so ids stay valid and
+    // selection is preserved. Only transforms change, so that's all we restore.
+    entt::registry&       reg  = m_scene.Reg();
+    const entt::registry& breg = m_playBackup.Reg();
+    for (auto [live, backup] : m_playMap) {
+        if (reg.valid(live) && breg.valid(backup))
+            reg.get<TransformComponent>(live) = breg.get<TransformComponent>(backup);
+    }
+    m_playBackup.Clear();
+    m_playMap.clear();
+    m_playState = PlayState::Editing;
+    LogInfo("Play mode: stopped (scene restored)");
+}
+
+void EditorUI::TogglePause() {
+    if (m_playState == PlayState::Playing)      m_playState = PlayState::Paused;
+    else if (m_playState == PlayState::Paused)  m_playState = PlayState::Playing;
+}
+
+void EditorUI::UpdatePlayMode() {
+    if (m_playState != PlayState::Playing) return;
+    float dt = ImGui::GetIO().DeltaTime;
+    m_playTime += dt;
+
+    entt::registry&       reg  = m_scene.Reg();
+    const entt::registry& breg = m_playBackup.Reg();
+
+    // Built-in behaviors are evaluated relative to the play-start snapshot, so
+    // they're deterministic and Stop cleanly restores the scene.
+    auto baseOf = [&](entt::entity e) -> const TransformComponent* {
+        auto it = m_playMap.find(e);
+        if (it == m_playMap.end() || !breg.valid(it->second)) return nullptr;
+        return &breg.get<TransformComponent>(it->second);
+    };
+
+    for (auto [e, rot] : reg.view<RotatorComponent>().each()) {
+        if (!rot.enabled) continue;
+        const TransformComponent* base = baseOf(e);
+        if (!base) continue;
+        glm::vec3 ax = rot.axis;
+        if (glm::length(ax) < 1e-4f) ax = glm::vec3(0, 1, 0);
+        ax = glm::normalize(ax);
+        reg.get<TransformComponent>(e).rotation =
+            glm::angleAxis(glm::radians(rot.speed * m_playTime), ax) * base->rotation;
+    }
+
+    for (auto [e, flo] : reg.view<FloaterComponent>().each()) {
+        if (!flo.enabled) continue;
+        const TransformComponent* base = baseOf(e);
+        if (!base) continue;
+        glm::vec3 ax = flo.axis;
+        if (glm::length(ax) < 1e-4f) ax = glm::vec3(0, 1, 0);
+        ax = glm::normalize(ax);
+        float off = std::sin(m_playTime * flo.speed) * flo.amount;
+        reg.get<TransformComponent>(e).position = base->position + ax * off;
+    }
+
+    if (m_lua) m_lua->UpdateAll(m_scene, dt);   // script OnUpdate(dt)
 }
 
 void EditorUI::RenderViewportToolbar() {
@@ -1321,11 +1450,25 @@ void EditorUI::RenderViewportToolbar() {
     const ImVec2 bsz(30.0f, 26.0f);
     ImGui::SetCursorPos(ImVec2(8.0f, (kViewportToolbarH - bsz.y) * 0.5f));
 
-    // Play / Stop — placeholders until play mode exists.
-    if (IconButton(ICON_FA_PLAY, "##vp_play", bsz)) { /* TODO: enter play mode */ }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Play (coming soon)");
+    // Play / Pause toggle.
+    const bool playing = (m_playState == PlayState::Playing);
+    const bool editing = (m_playState == PlayState::Editing);
+    const char* playIcon = playing ? ICON_FA_PAUSE : ICON_FA_PLAY;
+    ImU32 playCol = editing ? IM_COL32(120, 210, 120, 255)   // green "play"
+                            : IM_COL32(235, 200, 90, 255);    // amber "pause/resume"
+    if (IconButton(playIcon, "##vp_play", bsz, playCol)) {
+        if (editing) EnterPlayMode();
+        else         TogglePause();
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(editing ? "Play" : (playing ? "Pause" : "Resume"));
+
     ImGui::SameLine(0, 4);
-    if (IconButton(ICON_FA_STOP, "##vp_stop", bsz)) { /* TODO: stop */ }
+    ImU32 stopCol = editing ? IM_COL32(110, 110, 118, 255)    // dimmed when nothing to stop
+                            : IM_COL32(220, 90, 90, 255);     // red "stop"
+    if (IconButton(ICON_FA_STOP, "##vp_stop", bsz, stopCol)) {
+        if (!editing) ExitPlayMode();
+    }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stop");
 
     // Render screenshot.
@@ -1490,15 +1633,31 @@ void EditorUI::RenderViewport() {
     m_viewportWidth  = viewportSize.x;
     m_viewportHeight = viewportSize.y;
 
+    const bool editing = (m_playState == PlayState::Editing);
+
     float aspect = (viewportSize.y > 0) ? viewportSize.x / viewportSize.y : 1.0f;
     glm::mat4 view       = m_camera.GetViewMatrix();
     glm::mat4 projection = m_camera.GetProjectionMatrix(aspect);
 
+    // In play mode, render through the scene's first camera entity (game view).
+    if (!editing) {
+        entt::registry& reg = m_scene.Reg();
+        for (auto [e, t, cam] : reg.view<TransformComponent, CameraComponent>().each()) {
+            glm::mat4 camWorld = glm::translate(glm::mat4(1.0f), t.position)
+                               * glm::mat4_cast(t.rotation);
+            view       = glm::inverse(camWorld);
+            projection = glm::perspective(glm::radians(cam.fov), aspect, cam.nearZ, cam.farZ);
+            break;
+        }
+    }
+
     ImVec2 imageScreenPos = ImGui::GetCursorScreenPos();
 
     if (m_sceneRenderer && viewportSize.x > 0 && viewportSize.y > 0) {
+        // No selection outline while playing — that's an editor-only concept.
+        entt::entity selEntity = editing ? m_selected : entt::null;
         uint32_t textureID = m_sceneRenderer->Render(
-            m_gameObjects, m_selectedObjectIndex,
+            m_scene, selEntity,
             (int)viewportSize.x, (int)viewportSize.y,
             view, projection);
 
@@ -1506,6 +1665,7 @@ void EditorUI::RenderViewport() {
             ImGui::Image((ImTextureID)(intptr_t)textureID, viewportSize, ImVec2(0, 1), ImVec2(1, 0));
 
         if (ImGui::BeginDragDropTarget()) {
+            entt::registry& reg = m_scene.Reg();
             if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("ASSET_EMAT")) {
                 std::string matPath(static_cast<const char*>(p->Data));
 
@@ -1513,17 +1673,17 @@ void EditorUI::RenderViewport() {
                 ImVec2 vpMin    = imageScreenPos;
                 float ndcX = (2.0f * (mousePos.x - vpMin.x)) / viewportSize.x - 1.0f;
                 float ndcY = 1.0f - (2.0f * (mousePos.y - vpMin.y)) / viewportSize.y;
-                int hitIdx = PickObject(m_gameObjects, view, projection, ndcX, ndcY);
+                entt::entity hit = PickObject(m_scene, view, projection, ndcX, ndcY);
 
-                int targetIdx = (hitIdx >= 0) ? hitIdx : m_selectedObjectIndex;
-                if (targetIdx >= 0 && targetIdx < (int)m_gameObjects.size()) {
-                    m_gameObjects[targetIdx].materialPath = matPath;
+                entt::entity target = (hit != entt::null) ? hit : m_selected;
+                if (m_scene.Valid(target)) {
+                    reg.emplace_or_replace<MaterialComponent>(target, MaterialComponent{ matPath });
                     if (m_nodeEditor) m_nodeEditor->EnsureCompiled(matPath, m_sceneRenderer);
-                    m_selectedObjectIndex = targetIdx;
+                    m_selected = target;
                     m_sceneDirty = true;
                     namespace fs = std::filesystem;
                     LogInfo("Material \"" + fs::path(matPath).stem().string()
-                        + "\" в†’ " + m_gameObjects[targetIdx].name);
+                        + "\" -> " + reg.get<NameComponent>(target).name);
                 }
             }
 
@@ -1534,12 +1694,12 @@ void EditorUI::RenderViewport() {
                 ImVec2 vpMin    = imageScreenPos;
                 float ndcX = (2.0f * (mousePos.x - vpMin.x)) / viewportSize.x - 1.0f;
                 float ndcY = 1.0f - (2.0f * (mousePos.y - vpMin.y)) / viewportSize.y;
-                int hitIdx = PickObject(m_gameObjects, view, projection, ndcX, ndcY);
+                entt::entity hit = PickObject(m_scene, view, projection, ndcX, ndcY);
 
-                int targetIdx = (hitIdx >= 0) ? hitIdx : m_selectedObjectIndex;
+                entt::entity target = (hit != entt::null) ? hit : m_selected;
                 ImGui::BeginTooltip();
-                if (targetIdx >= 0 && targetIdx < (int)m_gameObjects.size())
-                    ImGui::Text("Assign to: %s", m_gameObjects[targetIdx].name.c_str());
+                if (m_scene.Valid(target))
+                    ImGui::Text("Assign to: %s", reg.get<NameComponent>(target).name.c_str());
                 else
                     ImGui::TextDisabled("No object under cursor");
                 ImGui::EndTooltip();
@@ -1551,7 +1711,8 @@ void EditorUI::RenderViewport() {
 
     // ── Light gizmo icons + selected-light range overlay ─────────────────
     // Lights have no mesh; draw a billboarded bulb icon so they're visible.
-    {
+    // Editor-only: hidden while playing for a clean game view.
+    if (editing) {
         ImDrawList* dl = ImGui::GetWindowDrawList();
         glm::mat4 viewProj = projection * view;
         constexpr float kPi = 3.14159265358979f;
@@ -1585,35 +1746,32 @@ void EditorUI::RenderViewport() {
             }
         };
 
-        for (size_t i = 0; i < m_gameObjects.size(); ++i) {
-            const GameObject& o = m_gameObjects[i];
-            if (o.type != PrimitiveType::Light) continue;
-
-            glm::vec3 pos(o.position[0], o.position[1], o.position[2]);
-            bool sel = (static_cast<int>(i) == m_selectedObjectIndex);
+        for (auto [e, t, L] : m_scene.Reg().view<TransformComponent, LightComponent>().each()) {
+            glm::vec3 pos = t.position;
+            bool sel = (m_selected == e);
 
             ImVec2 sp;
             bool   onScreen = toScreen(pos, sp);
 
             // Range / cone overlay — only for the selected light, kept subtle.
             if (sel) {
-                glm::mat4 m   = BuildModelMatrix(o);
+                glm::mat4 m   = t.Matrix();
                 glm::vec3 dir = glm::normalize(glm::mat3(m) * glm::vec3(0.0f, 0.0f, -1.0f));
-                ImU32 line = IM_COL32((int)(o.lightColor[0] * 255), (int)(o.lightColor[1] * 255),
-                                      (int)(o.lightColor[2] * 255), 70);   // low alpha = subtle
+                ImU32 line = IM_COL32((int)(L.color.r * 255), (int)(L.color.g * 255),
+                                      (int)(L.color.b * 255), 70);   // low alpha = subtle
 
-                if (o.lightType == 1) {                       // Point → wireframe sphere
-                    worldCircle(pos, glm::vec3(1,0,0), glm::vec3(0,1,0), o.lightRange, line);
-                    worldCircle(pos, glm::vec3(0,1,0), glm::vec3(0,0,1), o.lightRange, line);
-                    worldCircle(pos, glm::vec3(1,0,0), glm::vec3(0,0,1), o.lightRange, line);
-                } else if (o.lightType == 2) {                // Spot → cone
+                if (L.type == 1) {                            // Point → wireframe sphere
+                    worldCircle(pos, glm::vec3(1,0,0), glm::vec3(0,1,0), L.range, line);
+                    worldCircle(pos, glm::vec3(0,1,0), glm::vec3(0,0,1), L.range, line);
+                    worldCircle(pos, glm::vec3(1,0,0), glm::vec3(0,0,1), L.range, line);
+                } else if (L.type == 2) {                     // Spot → cone
                     glm::vec3 u, v; planeBasis(dir, u, v);
-                    glm::vec3 base   = pos + dir * o.lightRange;
-                    float     radius = o.lightRange * tanf(glm::radians(o.spotOuterDeg));
+                    glm::vec3 base   = pos + dir * L.range;
+                    float     radius = L.range * tanf(glm::radians(L.outerDeg));
                     worldCircle(base, u, v, radius, line);
                     for (int k = 0; k < 4; ++k) {             // 4 edge lines apex → rim
-                        float t = (float)k / 4 * 2.0f * kPi;
-                        glm::vec3 rim = base + radius * (cosf(t) * u + sinf(t) * v);
+                        float t2 = (float)k / 4 * 2.0f * kPi;
+                        glm::vec3 rim = base + radius * (cosf(t2) * u + sinf(t2) * v);
                         ImVec2 a, b;
                         if (toScreen(pos, a) && toScreen(rim, b)) dl->AddLine(a, b, line, 1.2f);
                     }
@@ -1626,9 +1784,9 @@ void EditorUI::RenderViewport() {
 
             if (!onScreen) continue;
 
-            ImU32  tint = IM_COL32((int)(o.lightColor[0] * 255), (int)(o.lightColor[1] * 255),
-                                   (int)(o.lightColor[2] * 255), 255);
-            const char* icon = (o.lightType == 0) ? ICON_FA_SUN : ICON_FA_LIGHTBULB;
+            ImU32  tint = IM_COL32((int)(L.color.r * 255), (int)(L.color.g * 255),
+                                   (int)(L.color.b * 255), 255);
+            const char* icon = (L.type == 0) ? ICON_FA_SUN : ICON_FA_LIGHTBULB;
             ImVec2 ts = ImGui::CalcTextSize(icon);
             ImVec2 tp(sp.x - ts.x * 0.5f, sp.y - ts.y * 0.5f);
 
@@ -1650,48 +1808,38 @@ void EditorUI::RenderViewport() {
             gs.Colors[ImGuizmo::SELECTION] = ImVec4(1.0f, 1.0f, 1.0f, 0.88f);
     }
 
-    if (m_selectedObjectIndex >= 0 && m_selectedObjectIndex < (int)m_gameObjects.size()) {
-        GameObject& sel = m_gameObjects[m_selectedObjectIndex];
+    if (editing && m_scene.Valid(m_selected) &&
+        EntityType(m_scene.Reg(), m_selected) != PrimitiveType::Empty) {
+        TransformComponent& tr = m_scene.Reg().get<TransformComponent>(m_selected);
+        glm::mat4 model = tr.Matrix();
+        glm::mat4 delta(1.0f);
 
-        if (sel.type != PrimitiveType::Empty) {
-            glm::mat4 model = BuildModelMatrix(sel);
-            glm::mat4 delta(1.0f);
-
-            if (ImGuizmo::Manipulate(
-                    glm::value_ptr(view), glm::value_ptr(projection),
-                    m_gizmoOp, m_gizmoMode,
-                    glm::value_ptr(model),
-                    glm::value_ptr(delta)))
-            {
-                if (m_gizmoOp == ImGuizmo::TRANSLATE) {
-                    // delta[3] is the displacement in world space for both
-                    // WORLD and LOCAL modes вЂ” avoids the mModelSource*T_delta
-                    // multiplication-order bug that rotates the delta.
-                    sel.position[0] += delta[3][0];
-                    sel.position[1] += delta[3][1];
-                    sel.position[2] += delta[3][2];
-                } else {
-                    // ROTATE / SCALE: extract directly from the result matrix.
-                    sel.position[0] = model[3][0];
-                    sel.position[1] = model[3][1];
-                    sel.position[2] = model[3][2];
-
-                    sel.scale[0] = glm::length(glm::vec3(model[0]));
-                    sel.scale[1] = glm::length(glm::vec3(model[1]));
-                    sel.scale[2] = glm::length(glm::vec3(model[2]));
-
-                    if (sel.scale[0] > 1e-5f && sel.scale[1] > 1e-5f && sel.scale[2] > 1e-5f) {
-                        glm::mat3 rotMat(
-                            glm::vec3(model[0]) / sel.scale[0],
-                            glm::vec3(model[1]) / sel.scale[1],
-                            glm::vec3(model[2]) / sel.scale[2]);
-                        glm::quat q = glm::quat_cast(rotMat);
-                        sel.rotQuat[0] = q.x; sel.rotQuat[1] = q.y;
-                        sel.rotQuat[2] = q.z; sel.rotQuat[3] = q.w;
-                    }
+        if (ImGuizmo::Manipulate(
+                glm::value_ptr(view), glm::value_ptr(projection),
+                m_gizmoOp, m_gizmoMode,
+                glm::value_ptr(model),
+                glm::value_ptr(delta)))
+        {
+            if (m_gizmoOp == ImGuizmo::TRANSLATE) {
+                // delta[3] is the world-space displacement for both WORLD and
+                // LOCAL modes — avoids the multiplication-order bug that would
+                // rotate the delta.
+                tr.position += glm::vec3(delta[3]);
+            } else {
+                // ROTATE / SCALE: extract directly from the result matrix.
+                tr.position = glm::vec3(model[3]);
+                glm::vec3 sc(glm::length(glm::vec3(model[0])),
+                            glm::length(glm::vec3(model[1])),
+                            glm::length(glm::vec3(model[2])));
+                tr.scale = sc;
+                if (sc.x > 1e-5f && sc.y > 1e-5f && sc.z > 1e-5f) {
+                    glm::mat3 rotMat(glm::vec3(model[0]) / sc.x,
+                                     glm::vec3(model[1]) / sc.y,
+                                     glm::vec3(model[2]) / sc.z);
+                    tr.rotation = glm::quat_cast(rotMat);
                 }
-                m_sceneDirty = true;
             }
+            m_sceneDirty = true;
         }
     }
 
@@ -1719,23 +1867,23 @@ void EditorUI::RenderViewport() {
                 m_camera.Pan(delta.x, delta.y);
         }
 
-        if (ImGui::IsItemDeactivated() && m_viewportDragAccum < 4.0f && !ImGuizmo::IsOver()) {
+        if (editing && ImGui::IsItemDeactivated() && m_viewportDragAccum < 4.0f && !ImGuizmo::IsOver()) {
             ImVec2 itemMin  = ImGui::GetItemRectMin();
             ImVec2 mousePos = ImGui::GetIO().MousePos;
             float ndcX = (2.0f * (mousePos.x - itemMin.x)) / viewportSize.x - 1.0f;
             float ndcY = 1.0f - (2.0f * (mousePos.y - itemMin.y)) / viewportSize.y;
 
-            int hitIndex = PickObject(m_gameObjects, view, projection, ndcX, ndcY);
-            if (hitIndex >= 0) {
-                SelectGameObject(hitIndex);
-                LogInfo("Selected: " + m_gameObjects[hitIndex].name);
+            entt::entity hit = PickObject(m_scene, view, projection, ndcX, ndcY);
+            if (hit != entt::null) {
+                SelectEntity(hit);
+                LogInfo("Selected: " + m_scene.Reg().get<NameComponent>(hit).name);
             } else {
-                m_selectedObjectIndex = -1;
+                m_selected = entt::null;
             }
         }
     }
 
-    if (ImGui::IsWindowFocused() && !ImGuizmo::IsUsing()) {
+    if (editing && ImGui::IsWindowFocused() && !ImGuizmo::IsUsing()) {
         if (ImGui::IsKeyPressed(ImGuiKey_M)) m_gizmoOp = ImGuizmo::TRANSLATE;
         if (ImGui::IsKeyPressed(ImGuiKey_R)) m_gizmoOp = ImGuizmo::ROTATE;
         if (ImGui::IsKeyPressed(ImGuiKey_S)) m_gizmoOp = ImGuizmo::SCALE;
@@ -1744,14 +1892,25 @@ void EditorUI::RenderViewport() {
     }
 
     ImGui::SetCursorPos(ImVec2(imagePos.x + 8.0f, imagePos.y + 8.0f));
-    {
+    if (editing) {
         const char* opName = (m_gizmoOp == ImGuizmo::TRANSLATE) ? "Move (M)"  :
                              (m_gizmoOp == ImGuizmo::ROTATE)    ? "Rotate (R)":
                                                                    "Scale (S)";
         const char* modeName = (m_gizmoMode == ImGuizmo::WORLD) ? "World" : "Local";
         ImGui::TextColored(ImVec4(0.72f, 0.72f, 0.75f, 1.0f),
             "%zu objects  |  %s  |  %s (X)  |  %.0f FPS",
-            m_gameObjects.size(), opName, modeName, ImGui::GetIO().Framerate);
+            (size_t)m_scene.Reg().view<NameComponent>().size(), opName, modeName, ImGui::GetIO().Framerate);
+    } else {
+        // Play-mode indicator: border + status label.
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImU32 col = (m_playState == PlayState::Paused) ? IM_COL32(235, 200, 90, 230)
+                                                       : IM_COL32(220, 90, 90, 230);
+        dl->AddRect(imageScreenPos, ImVec2(imageScreenPos.x + viewportSize.x,
+                    imageScreenPos.y + viewportSize.y), col, 0.0f, 0, 2.5f);
+        const char* label = (m_playState == PlayState::Paused) ? ICON_FA_PAUSE "  PAUSED"
+                                                               : ICON_FA_PLAY  "  PLAYING";
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(col), "%s   |   %.1fs   |   %.0f FPS",
+                           label, m_playTime, ImGui::GetIO().Framerate);
     }
 
     // Timeline strip below the 3D view (placeholder for now).
@@ -1765,61 +1924,80 @@ void EditorUI::RenderInspector() {
 
     ImGui::Begin("Inspector", &m_showInspector, ImGuiWindowFlags_NoCollapse);
 
-    GameObject* selected = GetSelectedObject();
-    if (selected) {
-        ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.88f, 1.0f), "Selected: %s", selected->name.c_str());
-        ImGui::TextDisabled("Type: %s", ToString(selected->type));
-        ImGui::Separator();
+    if (m_scene.Valid(m_selected)) {
+        entt::registry& reg      = m_scene.Reg();
+        entt::entity    selected = m_selected;
+        PrimitiveType   ptype    = EntityType(reg, selected);
 
-        ImGui::Text("Transform");
+        // Section header bar: full-width plate with a crimson accent tab + title.
+        auto SectionHeader = [](const char* label) {
+            ImGui::Dummy(ImVec2(0.0f, 4.0f));
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            float  w = ImGui::GetContentRegionAvail().x;
+            float  h = ImGui::GetTextLineHeight() + 10.0f;
+            dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), IM_COL32(46, 46, 54, 255), 5.0f);
+            dl->AddRectFilled(p, ImVec2(p.x + 3.0f, p.y + h), IM_COL32(192, 54, 76, 255),
+                              5.0f, ImDrawFlags_RoundCornersLeft);
+            dl->AddText(ImVec2(p.x + 12.0f, p.y + 5.0f), IM_COL32(236, 236, 242, 255), label);
+            ImGui::Dummy(ImVec2(0.0f, h + 4.0f));
+        };
+
+        ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.88f, 1.0f), "Selected: %s",
+                           reg.get<NameComponent>(selected).name.c_str());
+        ImGui::TextDisabled("Type: %s", ToString(ptype));
+
+        SectionHeader("Transform");
         ImGui::Indent();
         RenderTransformEditor(selected);
         ImGui::Unindent();
 
-        if (selected->type == PrimitiveType::Light) {
-            ImGui::Separator();
-            ImGui::Text("Light");
+        if (ptype == PrimitiveType::Light) {
+            SectionHeader("Light");
             ImGui::Indent();
+            LightComponent& L = reg.get<LightComponent>(selected);
             bool lc = false;
 
             const char* kinds[] = { "Directional", "Point", "Spot" };
             ImGui::SetNextItemWidth(-1);
-            if (ImGui::Combo("##ltype", &selected->lightType, kinds, 3)) lc = true;
-            if (selected->lightType < 0) selected->lightType = 0;
-            if (selected->lightType > 2) selected->lightType = 2;
+            if (ImGui::Combo("##ltype", &L.type, kinds, 3)) lc = true;
+            if (L.type < 0) L.type = 0;
+            if (L.type > 2) L.type = 2;
 
             ImGui::TextDisabled("Color");
-            if (ImGui::ColorEdit3("##lcol", selected->lightColor,
+            if (ImGui::ColorEdit3("##lcol", glm::value_ptr(L.color),
                                   ImGuiColorEditFlags_NoInputs)) lc = true;
 
             ImGui::TextDisabled("Intensity");
             ImGui::SetNextItemWidth(-1);
-            if (ImGui::DragFloat("##lint", &selected->lightIntensity, 0.05f, 0.0f, 100.0f, "%.2f")) lc = true;
+            if (ImGui::DragFloat("##lint", &L.intensity, 0.05f, 0.0f, 100.0f, "%.2f")) lc = true;
 
-            if (selected->lightType != 0) {  // point / spot
+            if (L.type != 0) {  // point / spot
                 ImGui::TextDisabled("Range");
                 ImGui::SetNextItemWidth(-1);
-                if (ImGui::DragFloat("##lrange", &selected->lightRange, 0.1f, 0.1f, 1000.0f, "%.1f")) lc = true;
+                if (ImGui::DragFloat("##lrange", &L.range, 0.1f, 0.1f, 1000.0f, "%.1f")) lc = true;
             }
-            if (selected->lightType == 2) {  // spot
+            if (L.type == 2) {  // spot
                 ImGui::TextDisabled("Cone (inner / outer deg)");
                 ImGui::SetNextItemWidth(-1);
-                if (ImGui::DragFloat2("##lcone", &selected->spotInnerDeg, 0.2f, 0.0f, 89.0f, "%.1f")) lc = true;
-                if (selected->spotInnerDeg > selected->spotOuterDeg)
-                    selected->spotInnerDeg = selected->spotOuterDeg;
+                float cone[2] = { L.innerDeg, L.outerDeg };
+                if (ImGui::DragFloat2("##lcone", cone, 0.2f, 0.0f, 89.0f, "%.1f")) {
+                    L.innerDeg = cone[0]; L.outerDeg = cone[1]; lc = true;
+                }
+                if (L.innerDeg > L.outerDeg) L.innerDeg = L.outerDeg;
             }
 
             if (lc) m_sceneDirty = true;
             ImGui::Unindent();
         }
 
-        if (selected->type == PrimitiveType::Model) {
-            ImGui::Separator();
-            ImGui::Text("Model Asset");
+        if (ptype == PrimitiveType::Model) {
+            SectionHeader("Model Asset");
             ImGui::Indent();
-            ImGui::TextDisabled("%s", selected->modelPath.c_str());
+            MeshComponent& M = reg.get<MeshComponent>(selected);
+            ImGui::TextDisabled("%s", M.modelPath.c_str());
             if (ImGui::Button("Reimport")) {
-                std::filesystem::path emdl(selected->modelPath);
+                std::filesystem::path emdl(M.modelPath);
                 std::string guessedSource = emdl.replace_extension("").string();
                 for (const char* ext : { ".obj", ".fbx", ".gltf", ".glb" }) {
                     std::string candidate = guessedSource + ext;
@@ -1827,10 +2005,7 @@ void EditorUI::RenderInspector() {
                         std::string newEmdl = ModelImporter::Import(candidate);
                         if (!newEmdl.empty()) {
                             glm::vec3 mn, mx;
-                            if (ModelMesh::ReadAabb(newEmdl, mn, mx)) {
-                                selected->aabbMin[0] = mn.x; selected->aabbMin[1] = mn.y; selected->aabbMin[2] = mn.z;
-                                selected->aabbMax[0] = mx.x; selected->aabbMax[1] = mx.y; selected->aabbMax[2] = mx.z;
-                            }
+                            if (ModelMesh::ReadAabb(newEmdl, mn, mx)) { M.aabbMin = mn; M.aabbMax = mx; }
                             LogSuccess("Reimported: " + candidate);
                         }
                         break;
@@ -1840,18 +2015,19 @@ void EditorUI::RenderInspector() {
             ImGui::Unindent();
         }
 
-        ImGui::Separator();
-        ImGui::Text("Material");
+        SectionHeader("Material");
         ImGui::Indent();
-        if (selected->materialPath.empty()) {
+        MaterialComponent* matc = reg.try_get<MaterialComponent>(selected);
+        if (!matc || matc->path.empty()) {
             ImGui::TextDisabled("No material assigned");
             ImGui::TextDisabled("Drag .emat from Asset Browser");
         } else {
             namespace fs = std::filesystem;
+            std::string matPath = matc->path;
             if (m_previewRenderer) {
-                Material* pm = MaterialManager::GetOrLoad(selected->materialPath);
+                Material* pm = MaterialManager::GetOrLoad(matPath);
                 if (pm) {
-                    uint32_t pt = m_previewRenderer->GetPreview(pm, selected->materialPath);
+                    uint32_t pt = m_previewRenderer->GetPreview(pm, matPath);
                     if (pt) {
                         ImDrawList* dl = ImGui::GetWindowDrawList();
                         ImVec2 cp = ImGui::GetCursorScreenPos();
@@ -1865,14 +2041,14 @@ void EditorUI::RenderInspector() {
                 }
             }
             ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 3.0f);
-            ImGui::TextDisabled("%s", fs::path(selected->materialPath).filename().string().c_str());
+            ImGui::TextDisabled("%s", fs::path(matPath).filename().string().c_str());
             ImGui::SameLine(ImGui::GetContentRegionMax().x - 20.0f);
             ImGui::SetCursorPosY(ImGui::GetCursorPosY() - 3.0f);
             if (IconButton(ICON_FA_XMARK, "##detachmat", ImVec2(20.0f, 20.0f))) {
-                selected->materialPath.clear();
+                reg.remove<MaterialComponent>(selected);
                 m_sceneDirty = true;
             }
-            Material* mat = MaterialManager::GetOrLoad(selected->materialPath);
+            Material* mat = MaterialManager::GetOrLoad(matPath);
             if (mat) {
                 bool changed = false;
                 constexpr float kLabelW = 86.0f;
@@ -1911,7 +2087,7 @@ void EditorUI::RenderInspector() {
                     ImGui::EndTable();
                 }
 
-                if (changed) { mat->Save(selected->materialPath); m_sceneDirty = true; }
+                if (changed) { mat->Save(matPath); m_sceneDirty = true; }
 
                 ImGui::Spacing();
                 ImGui::Separator();
@@ -1932,7 +2108,7 @@ void EditorUI::RenderInspector() {
                         if (!p.empty()) {
                             TextureManager::Invalidate(mat->albedoTexture);
                             mat->albedoTexture = p;
-                            mat->Save(selected->materialPath);
+                            mat->Save(matPath);
                             m_sceneDirty = true;
                         }
                     }
@@ -1940,7 +2116,7 @@ void EditorUI::RenderInspector() {
                     if (ImGui::Button("Remove##tex")) {
                         TextureManager::Invalidate(mat->albedoTexture);
                         mat->albedoTexture.clear();
-                        mat->Save(selected->materialPath);
+                        mat->Save(matPath);
                         m_sceneDirty = true;
                     }
                     ImGui::EndGroup();
@@ -1950,7 +2126,7 @@ void EditorUI::RenderInspector() {
                         std::string p = OpenTextureFileDialog();
                         if (!p.empty()) {
                             mat->albedoTexture = p;
-                            mat->Save(selected->materialPath);
+                            mat->Save(matPath);
                             m_sceneDirty = true;
                         }
                     }
@@ -1968,15 +2144,15 @@ void EditorUI::RenderInspector() {
                         ImGui::TextDisabled("%s", std::filesystem::path(mat->normalTexture).filename().string().c_str());
                         if (ImGui::Button("Change##nrm")) {
                             std::string p = OpenTextureFileDialog();
-                            if (!p.empty()) { TextureManager::Invalidate(mat->normalTexture); mat->normalTexture = p; mat->Save(selected->materialPath); m_sceneDirty = true; }
+                            if (!p.empty()) { TextureManager::Invalidate(mat->normalTexture); mat->normalTexture = p; mat->Save(matPath); m_sceneDirty = true; }
                         }
                         ImGui::SameLine();
-                        if (ImGui::Button("Remove##nrm")) { TextureManager::Invalidate(mat->normalTexture); mat->normalTexture.clear(); mat->Save(selected->materialPath); m_sceneDirty = true; }
+                        if (ImGui::Button("Remove##nrm")) { TextureManager::Invalidate(mat->normalTexture); mat->normalTexture.clear(); mat->Save(matPath); m_sceneDirty = true; }
                         ImGui::EndGroup();
                     } else {
                         if (ImGui::Button("Load Normal Map...")) {
                             std::string p = OpenTextureFileDialog();
-                            if (!p.empty()) { mat->normalTexture = p; mat->Save(selected->materialPath); m_sceneDirty = true; }
+                            if (!p.empty()) { mat->normalTexture = p; mat->Save(matPath); m_sceneDirty = true; }
                         }
                     }
                 }
@@ -1998,7 +2174,7 @@ void EditorUI::RenderInspector() {
                             if (!p.empty()) {
                                 TextureManager::Invalidate(mat->ormTexture);
                                 mat->ormTexture = p;
-                                mat->Save(selected->materialPath);
+                                mat->Save(matPath);
                                 m_sceneDirty = true;
                             }
                         }
@@ -2006,7 +2182,7 @@ void EditorUI::RenderInspector() {
                         if (ImGui::Button("Remove##mr")) {
                             TextureManager::Invalidate(mat->ormTexture);
                             mat->ormTexture.clear();
-                            mat->Save(selected->materialPath);
+                            mat->Save(matPath);
                             m_sceneDirty = true;
                         }
                         ImGui::EndGroup();
@@ -2015,7 +2191,7 @@ void EditorUI::RenderInspector() {
                             std::string p = OpenTextureFileDialog();
                             if (!p.empty()) {
                                 mat->ormTexture = p;
-                                mat->Save(selected->materialPath);
+                                mat->Save(matPath);
                                 m_sceneDirty = true;
                             }
                         }
@@ -2024,17 +2200,111 @@ void EditorUI::RenderInspector() {
 
                 if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
                     if (m_nodeEditor)
-                        m_nodeEditor->Open(selected->materialPath, m_previewRenderer, m_sceneRenderer);
+                        m_nodeEditor->Open(matPath, m_previewRenderer, m_sceneRenderer);
                 }
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Double-click to open Node Editor");
             } else {
                 ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "File not found");
                 if (ImGui::Button("Clear")) {
-                    selected->materialPath.clear();
+                    reg.remove<MaterialComponent>(selected);
                     m_sceneDirty = true;
                 }
             }
+        }
+        ImGui::Unindent();
+
+        // ── Components ──────────────────────────────────────────────────
+        SectionHeader("Components");
+        ImGui::Indent();
+
+        // Shared header row: enable toggle + name + remove X. Returns true when
+        // the user clicked the X this frame (caller removes after using fields).
+        auto compHeader = [&](const char* label, bool* enabled) -> bool {
+            bool en = *enabled;
+            if (ImGui::Checkbox("##en", &en)) { *enabled = en; m_sceneDirty = true; }
+            ImGui::SameLine();
+            ImGui::Text("%s", label);
+            ImGui::SameLine(ImGui::GetContentRegionMax().x - 22.0f);
+            return IconButton(ICON_FA_XMARK, "##rmcomp", ImVec2(20.0f, 20.0f));
+        };
+
+        if (auto* r = reg.try_get<RotatorComponent>(selected)) {
+            ImGui::PushID("rotator");
+            bool remove = compHeader("Rotator", &r->enabled);
+            if (!remove) {
+                ImGui::TextDisabled("Axis");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::DragFloat3("##axis", glm::value_ptr(r->axis), 0.01f, -1.0f, 1.0f, "%.2f")) m_sceneDirty = true;
+                ImGui::TextDisabled("Speed (deg/s)");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::DragFloat("##spd", &r->speed, 0.5f, -720.0f, 720.0f, "%.1f")) m_sceneDirty = true;
+            }
+            ImGui::Spacing();
+            ImGui::PopID();
+            if (remove) { reg.remove<RotatorComponent>(selected); m_sceneDirty = true; }
+        }
+
+        if (auto* f = reg.try_get<FloaterComponent>(selected)) {
+            ImGui::PushID("floater");
+            bool remove = compHeader("Floater", &f->enabled);
+            if (!remove) {
+                ImGui::TextDisabled("Axis");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::DragFloat3("##axis", glm::value_ptr(f->axis), 0.01f, -1.0f, 1.0f, "%.2f")) m_sceneDirty = true;
+                ImGui::TextDisabled("Speed (rad/s)");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::DragFloat("##spd", &f->speed, 0.5f, -720.0f, 720.0f, "%.1f")) m_sceneDirty = true;
+                ImGui::TextDisabled("Amplitude");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::DragFloat("##amp", &f->amount, 0.01f, 0.0f, 100.0f, "%.2f")) m_sceneDirty = true;
+            }
+            ImGui::Spacing();
+            ImGui::PopID();
+            if (remove) { reg.remove<FloaterComponent>(selected); m_sceneDirty = true; }
+        }
+
+        if (auto* s = reg.try_get<ScriptComponent>(selected)) {
+            ImGui::PushID("script");
+            bool remove = compHeader("Script", &s->enabled);
+            if (!remove) {
+                ImGui::TextDisabled("Lua Script");
+                ImGui::TextWrapped("%s", s->path.empty() ? "(none)" : s->path.c_str());
+                if (ImGui::Button(ICON_FA_FOLDER_OPEN "  Browse##scr", ImVec2(-1, 0))) {
+                    std::string p = OpenScriptFileDialog();
+                    if (!p.empty()) {
+                        namespace fs = std::filesystem;
+                        std::error_code ec;
+                        fs::path rel = fs::relative(p, fs::current_path(), ec);
+                        std::string relStr = ec ? "" : rel.generic_string();
+                        s->path = (!relStr.empty() && relStr.rfind("..", 0) != 0) ? relStr : p;
+                        for (auto& ch : s->path) if (ch == '\\') ch = '/';
+                        m_sceneDirty = true;
+                    }
+                }
+                if (!s->path.empty() &&
+                    ImGui::Button(ICON_FA_XMARK "  Clear##scr", ImVec2(-1, 0))) {
+                    s->path.clear(); m_sceneDirty = true;
+                }
+            }
+            ImGui::Spacing();
+            ImGui::PopID();
+            if (remove) { reg.remove<ScriptComponent>(selected); m_sceneDirty = true; }
+        }
+
+        if (ImGui::Button(ICON_FA_PLUS "  Add Component", ImVec2(-1, 0)))
+            ImGui::OpenPopup("##addcomp");
+        if (ImGui::BeginPopup("##addcomp")) {
+            if (!reg.all_of<RotatorComponent>(selected) && ImGui::MenuItem("Rotator")) {
+                reg.emplace<RotatorComponent>(selected); m_sceneDirty = true;
+            }
+            if (!reg.all_of<FloaterComponent>(selected) && ImGui::MenuItem("Floater")) {
+                reg.emplace<FloaterComponent>(selected); m_sceneDirty = true;
+            }
+            if (!reg.all_of<ScriptComponent>(selected) && ImGui::MenuItem("Script")) {
+                reg.emplace<ScriptComponent>(selected); m_sceneDirty = true;
+            }
+            ImGui::EndPopup();
         }
         ImGui::Unindent();
     }
@@ -2047,8 +2317,9 @@ void EditorUI::RenderInspector() {
     ImGui::End();
 }
 
-void EditorUI::RenderTransformEditor(GameObject* obj) {
-    if (!obj) return;
+void EditorUI::RenderTransformEditor(entt::entity e) {
+    if (!m_scene.Valid(e)) return;
+    TransformComponent& tr = m_scene.Reg().get<TransformComponent>(e);
 
     auto XYZRow = [&](const char* rowLabel, float v[3], float step,
                        float vmin, float vmax, const char* fmt) -> bool
@@ -2070,25 +2341,28 @@ void EditorUI::RenderTransformEditor(GameObject* obj) {
         return changed;
     };
 
-    if (XYZRow("Position", obj->position, 0.1f, -1e6f, 1e6f, "%.2f"))
-        m_sceneDirty = true;
-
-    ImGui::Spacing();
-
-    glm::quat q(obj->rotQuat[3], obj->rotQuat[0], obj->rotQuat[1], obj->rotQuat[2]);
-    glm::vec3 euler = glm::degrees(glm::eulerAngles(q));
-    float eulerArr[3] = { euler.x, euler.y, euler.z };
-    if (XYZRow("Rotation", eulerArr, 0.5f, -360.0f, 360.0f, "%.1f")) {
-        glm::quat nq = glm::quat(glm::radians(glm::vec3(eulerArr[0], eulerArr[1], eulerArr[2])));
-        obj->rotQuat[0] = nq.x; obj->rotQuat[1] = nq.y;
-        obj->rotQuat[2] = nq.z; obj->rotQuat[3] = nq.w;
+    float pos[3] = { tr.position.x, tr.position.y, tr.position.z };
+    if (XYZRow("Position", pos, 0.1f, -1e6f, 1e6f, "%.2f")) {
+        tr.position = glm::vec3(pos[0], pos[1], pos[2]);
         m_sceneDirty = true;
     }
 
     ImGui::Spacing();
 
-    if (XYZRow("Scale", obj->scale, 0.05f, 0.001f, 1e4f, "%.3f"))
+    glm::vec3 euler = glm::degrees(glm::eulerAngles(tr.rotation));
+    float eulerArr[3] = { euler.x, euler.y, euler.z };
+    if (XYZRow("Rotation", eulerArr, 0.5f, -360.0f, 360.0f, "%.1f")) {
+        tr.rotation = glm::quat(glm::radians(glm::vec3(eulerArr[0], eulerArr[1], eulerArr[2])));
         m_sceneDirty = true;
+    }
+
+    ImGui::Spacing();
+
+    float scl[3] = { tr.scale.x, tr.scale.y, tr.scale.z };
+    if (XYZRow("Scale", scl, 0.05f, 0.001f, 1e4f, "%.3f")) {
+        tr.scale = glm::vec3(scl[0], scl[1], scl[2]);
+        m_sceneDirty = true;
+    }
 }
 
 void EditorUI::RenderConsole() {
@@ -2140,7 +2414,7 @@ bool EditorUI::SaveCurrentScene() {
         if (path.empty()) return false;
     }
     std::filesystem::create_directories(std::filesystem::path(path).parent_path());
-    if (!SceneSerializer::Save(path, m_gameObjects)) {
+    if (!SceneSerializer::Save(path, m_scene)) {
         LogError("Failed to save scene: " + path);
         return false;
     }
@@ -2234,43 +2508,37 @@ void EditorUI::RenderUnsavedChangesDialog() {
 }
 
 void EditorUI::AddGameObject(const std::string& name, PrimitiveType type) {
-    GameObject obj;
-    obj.name = name + "_" + std::to_string(m_objectCounter++);
-    obj.type = type;
-    m_gameObjects.push_back(obj);
+    std::string fullName = name + "_" + std::to_string(m_objectCounter++);
+    entt::entity e = m_scene.Create(fullName);
+    entt::registry& reg = m_scene.Reg();
+
+    MeshKind mk = MeshKindFromPrimitive(type);
+    if (mk != MeshKind::None)               reg.emplace<MeshComponent>(e, MeshComponent{ mk });
+    else if (type == PrimitiveType::Light)  reg.emplace<LightComponent>(e);
+    else if (type == PrimitiveType::Camera) reg.emplace<CameraComponent>(e);
+
     m_sceneDirty = true;
-    LogInfo("Created: " + obj.name);
+    LogInfo("Created: " + fullName);
 }
 
 void EditorUI::AddModelObject(const std::string& emdlPath) {
-    GameObject obj;
-    obj.type      = PrimitiveType::Model;
-    obj.modelPath = emdlPath;
-    obj.name      = std::filesystem::path(emdlPath).stem().string()
-                    + "_" + std::to_string(m_objectCounter++);
+    std::string fullName = std::filesystem::path(emdlPath).stem().string()
+                         + "_" + std::to_string(m_objectCounter++);
+    entt::entity e = m_scene.Create(fullName);
 
+    MeshComponent mc;
+    mc.kind      = MeshKind::Model;
+    mc.modelPath = emdlPath;
     glm::vec3 mn, mx;
-    if (ModelMesh::ReadAabb(emdlPath, mn, mx)) {
-        obj.aabbMin[0] = mn.x; obj.aabbMin[1] = mn.y; obj.aabbMin[2] = mn.z;
-        obj.aabbMax[0] = mx.x; obj.aabbMax[1] = mx.y; obj.aabbMax[2] = mx.z;
-    }
+    if (ModelMesh::ReadAabb(emdlPath, mn, mx)) { mc.aabbMin = mn; mc.aabbMax = mx; }
+    m_scene.Reg().emplace<MeshComponent>(e, mc);
 
-    m_gameObjects.push_back(obj);
     m_sceneDirty = true;
-    LogSuccess("Model added: " + obj.name);
+    LogSuccess("Model added: " + fullName);
 }
 
-void EditorUI::SelectGameObject(int index) {
-    if (index >= 0 && index < (int)m_gameObjects.size()) {
-        m_selectedObjectIndex = index;
-    }
-}
-
-GameObject* EditorUI::GetSelectedObject() {
-    if (m_selectedObjectIndex >= 0 && m_selectedObjectIndex < (int)m_gameObjects.size()) {
-        return &m_gameObjects[m_selectedObjectIndex];
-    }
-    return nullptr;
+void EditorUI::SelectEntity(entt::entity e) {
+    if (m_scene.Valid(e)) m_selected = e;
 }
 
 void EditorUI::SetViewportSize(float width, float height) {

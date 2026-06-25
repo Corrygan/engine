@@ -1,5 +1,4 @@
 #include "Picking.h"
-#include "../Scene/Transform.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -55,7 +54,7 @@ namespace {
     }
 
     bool RayIntersectsAabb(const glm::vec3& ro, const glm::vec3& rd,
-                            const float* aabbMin, const float* aabbMax, float& outT) {
+                            const glm::vec3& aabbMin, const glm::vec3& aabbMax, float& outT) {
         float tMin = -std::numeric_limits<float>::infinity();
         float tMax =  std::numeric_limits<float>::infinity();
         for (int i = 0; i < 3; ++i) {
@@ -90,7 +89,7 @@ namespace {
     }
 }
 
-int PickObject(const std::vector<GameObject>& objects,
+entt::entity PickObject(const Scene& scene,
     const glm::mat4& view, const glm::mat4& projection,
     float mouseNdcX, float mouseNdcY) {
 
@@ -104,44 +103,43 @@ int PickObject(const std::vector<GameObject>& objects,
     glm::vec3 rayOrigin = glm::vec3(nearPoint);
     glm::vec3 rayDir = glm::vec3(farPoint) - glm::vec3(nearPoint);
 
-    int closestIndex = -1;
+    entt::entity closest = entt::null;
     float closestT = std::numeric_limits<float>::infinity();
 
-    for (size_t i = 0; i < objects.size(); ++i) {
-        const PrimitiveType type = objects[i].type;
-        if (type == PrimitiveType::Camera || type == PrimitiveType::Light || type == PrimitiveType::Empty) {
-            continue;
-        }
+    // Only entities with a mesh are pickable; lights/cameras/empties are skipped
+    // naturally because they carry no MeshComponent.
+    const entt::registry& reg = scene.Reg();
+    auto meshes = reg.view<TransformComponent, MeshComponent>();
+    for (entt::entity e : meshes) {
+        const TransformComponent& t = meshes.get<TransformComponent>(e);
+        const MeshComponent&      m = meshes.get<MeshComponent>(e);
 
-        glm::mat4 model = BuildModelMatrix(objects[i]);
-        glm::mat4 invModel = glm::inverse(model);
-
+        glm::mat4 invModel = glm::inverse(t.Matrix());
         glm::vec3 localOrigin = glm::vec3(invModel * glm::vec4(rayOrigin, 1.0f));
-        glm::vec3 localDir = glm::vec3(invModel * glm::vec4(rayDir, 0.0f));
+        glm::vec3 localDir    = glm::vec3(invModel * glm::vec4(rayDir, 0.0f));
 
-        float t;
-        bool hit;
-        switch (type) {
-        case PrimitiveType::Sphere:
-            hit = RayIntersectsUnitSphere(localOrigin, localDir, t);
+        float hitT;
+        bool  hit;
+        switch (m.kind) {
+        case MeshKind::Sphere:
+            hit = RayIntersectsUnitSphere(localOrigin, localDir, hitT);
             break;
-        case PrimitiveType::Plane:
-            hit = RayIntersectsUnitPlane(localOrigin, localDir, t);
+        case MeshKind::Plane:
+            hit = RayIntersectsUnitPlane(localOrigin, localDir, hitT);
             break;
-        case PrimitiveType::Model:
-            hit = RayIntersectsAabb(localOrigin, localDir,
-                objects[i].aabbMin, objects[i].aabbMax, t);
+        case MeshKind::Model:
+            hit = RayIntersectsAabb(localOrigin, localDir, m.aabbMin, m.aabbMax, hitT);
             break;
-        default:
-            hit = RayIntersectsUnitCube(localOrigin, localDir, t);
+        default:   // Cube
+            hit = RayIntersectsUnitCube(localOrigin, localDir, hitT);
             break;
         }
 
-        if (hit && t < closestT) {
-            closestT = t;
-            closestIndex = static_cast<int>(i);
+        if (hit && hitT < closestT) {
+            closestT = hitT;
+            closest  = e;
         }
     }
 
-    return closestIndex;
+    return closest;
 }

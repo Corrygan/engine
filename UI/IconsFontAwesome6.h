@@ -35,6 +35,8 @@
 #define ICON_FA_PLAY            "\xef\x81\x8b"
 // U+F04D
 #define ICON_FA_STOP            "\xef\x81\x8d"
+// U+F04C
+#define ICON_FA_PAUSE           "\xef\x81\x8c"
 // U+F062
 #define ICON_FA_ARROW_UP        "\xef\x81\xa2"
 // U+F063

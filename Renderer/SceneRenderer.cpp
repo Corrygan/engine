@@ -8,7 +8,6 @@
 #include "Grid.h"
 #include "EnvironmentMap.h"
 #include "LightingGLSL.h"
-#include "../Scene/Transform.h"
 #include "glad/gl.h"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_inverse.hpp>
@@ -508,23 +507,23 @@ void main() {
         float     outerCos;
     };
 
-    std::vector<GpuLight> CollectLights(const std::vector<GameObject>& objects) {
+    std::vector<GpuLight> CollectLights(Scene& scene) {
         std::vector<GpuLight> lights;
-        for (const auto& o : objects) {
-            if (o.type != PrimitiveType::Light) continue;
+        auto view = scene.Reg().view<TransformComponent, LightComponent>();
+        for (auto e : view) {
             if ((int)lights.size() >= kMaxLights) break;
+            const TransformComponent& t = view.get<TransformComponent>(e);
+            const LightComponent&     l = view.get<LightComponent>(e);
 
-            glm::mat4 m   = BuildModelMatrix(o);
-            glm::vec3 fwd = glm::normalize(glm::mat3(m) * glm::vec3(0.0f, 0.0f, -1.0f));
-
+            glm::vec3 fwd = glm::normalize(glm::mat3(t.Matrix()) * glm::vec3(0.0f, 0.0f, -1.0f));
             GpuLight gl;
-            gl.type     = o.lightType;
-            gl.pos      = glm::vec3(o.position[0], o.position[1], o.position[2]);
+            gl.type     = l.type;
+            gl.pos      = t.position;
             gl.dir      = fwd;
-            gl.color    = glm::vec3(o.lightColor[0], o.lightColor[1], o.lightColor[2]) * o.lightIntensity;
-            gl.range    = o.lightRange;
-            gl.innerCos = std::cos(glm::radians(o.spotInnerDeg));
-            gl.outerCos = std::cos(glm::radians(o.spotOuterDeg));
+            gl.color    = l.color * l.intensity;
+            gl.range    = l.range;
+            gl.innerCos = std::cos(glm::radians(l.innerDeg));
+            gl.outerCos = std::cos(glm::radians(l.outerDeg));
             lights.push_back(gl);
         }
         return lights;
@@ -790,20 +789,19 @@ ModelMesh* SceneRenderer::GetOrLoadModel(const std::string& emdlPath) {
     return mesh;
 }
 
-PrimitiveMesh* SceneRenderer::GetMeshForType(PrimitiveType type) const {
-    switch (type) {
-    case PrimitiveType::Cube:   return m_cube;
-    case PrimitiveType::Sphere: return m_sphere;
-    case PrimitiveType::Plane:  return m_plane;
-    case PrimitiveType::Camera:
-    case PrimitiveType::Light:
-    case PrimitiveType::Empty:
+PrimitiveMesh* SceneRenderer::GetMeshForKind(MeshKind kind) const {
+    switch (kind) {
+    case MeshKind::Cube:   return m_cube;
+    case MeshKind::Sphere: return m_sphere;
+    case MeshKind::Plane:  return m_plane;
+    case MeshKind::Model:
+    case MeshKind::None:
     default:
         return nullptr;
     }
 }
 
-void SceneRenderer::RenderShadowPass(const std::vector<GameObject>& objects) {
+void SceneRenderer::RenderShadowPass(Scene& scene) {
     glBindFramebuffer(GL_FRAMEBUFFER, m_shadowFBO);
     glViewport(0, 0, m_shadowSize, m_shadowSize);
     glClear(GL_DEPTH_BUFFER_BIT);
@@ -817,14 +815,16 @@ void SceneRenderer::RenderShadowPass(const std::vector<GameObject>& objects) {
     m_depthShader->Bind();
     m_depthShader->SetMat4("uLightSpace", m_lightSpace);
 
-    for (const auto& obj : objects) {
+    auto view = scene.Reg().view<TransformComponent, MeshComponent>();
+    for (auto e : view) {
+        const MeshComponent& mc = view.get<MeshComponent>(e);
         PrimitiveMesh* primMesh  = nullptr;
         ModelMesh*     modelMesh = nullptr;
-        if (obj.type == PrimitiveType::Model) modelMesh = GetOrLoadModel(obj.modelPath);
-        else                                  primMesh  = GetMeshForType(obj.type);
+        if (mc.kind == MeshKind::Model) modelMesh = GetOrLoadModel(mc.modelPath);
+        else                            primMesh  = GetMeshForKind(mc.kind);
         if (!primMesh && !modelMesh) continue;
 
-        m_depthShader->SetMat4("uModel", BuildModelMatrix(obj));
+        m_depthShader->SetMat4("uModel", view.get<TransformComponent>(e).Matrix());
         if (modelMesh) modelMesh->Draw();
         else           primMesh->Draw();
     }
@@ -835,7 +835,7 @@ void SceneRenderer::RenderShadowPass(const std::vector<GameObject>& objects) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-void SceneRenderer::RenderPointShadowPass(const std::vector<GameObject>& objects,
+void SceneRenderer::RenderPointShadowPass(Scene& scene,
                                           const glm::vec3& lightPos, float farPlane) {
     static const glm::vec3 dirs[6] = {
         { 1, 0, 0}, {-1, 0, 0}, { 0, 1, 0}, { 0,-1, 0}, { 0, 0, 1}, { 0, 0,-1} };
@@ -866,14 +866,16 @@ void SceneRenderer::RenderPointShadowPass(const std::vector<GameObject>& objects
         glm::mat4 viewProj = proj * glm::lookAt(lightPos, lightPos + dirs[f], ups[f]);
         m_pointDepthShader->SetMat4("uViewProj", viewProj);
 
-        for (const auto& obj : objects) {
+        auto view = scene.Reg().view<TransformComponent, MeshComponent>();
+        for (auto e : view) {
+            const MeshComponent& mc = view.get<MeshComponent>(e);
             PrimitiveMesh* primMesh  = nullptr;
             ModelMesh*     modelMesh = nullptr;
-            if (obj.type == PrimitiveType::Model) modelMesh = GetOrLoadModel(obj.modelPath);
-            else                                  primMesh  = GetMeshForType(obj.type);
+            if (mc.kind == MeshKind::Model) modelMesh = GetOrLoadModel(mc.modelPath);
+            else                            primMesh  = GetMeshForKind(mc.kind);
             if (!primMesh && !modelMesh) continue;
 
-            m_pointDepthShader->SetMat4("uModel", BuildModelMatrix(obj));
+            m_pointDepthShader->SetMat4("uModel", view.get<TransformComponent>(e).Matrix());
             if (modelMesh) modelMesh->Draw();
             else           primMesh->Draw();
         }
@@ -994,7 +996,7 @@ void SceneRenderer::EnsureGBuffer(int width, int height) {
     glBindRenderbuffer(GL_RENDERBUFFER, 0);
 }
 
-void SceneRenderer::RenderGBuffer(const std::vector<GameObject>& objects,
+void SceneRenderer::RenderGBuffer(Scene& scene,
                                   const glm::mat4& view, const glm::mat4& projection) {
     glBindFramebuffer(GL_FRAMEBUFFER, m_gFBO);
     glViewport(0, 0, m_gW, m_gH);
@@ -1006,13 +1008,15 @@ void SceneRenderer::RenderGBuffer(const std::vector<GameObject>& objects,
     m_geomShader->Bind();
     m_geomShader->SetMat4("uView", view);
     m_geomShader->SetMat4("uProj", projection);
-    for (const auto& obj : objects) {
+    auto gview = scene.Reg().view<TransformComponent, MeshComponent>();
+    for (auto e : gview) {
+        const MeshComponent& mc = gview.get<MeshComponent>(e);
         PrimitiveMesh* primMesh  = nullptr;
         ModelMesh*     modelMesh = nullptr;
-        if (obj.type == PrimitiveType::Model) modelMesh = GetOrLoadModel(obj.modelPath);
-        else                                  primMesh  = GetMeshForType(obj.type);
+        if (mc.kind == MeshKind::Model) modelMesh = GetOrLoadModel(mc.modelPath);
+        else                            primMesh  = GetMeshForKind(mc.kind);
         if (!primMesh && !modelMesh) continue;
-        m_geomShader->SetMat4("uModel", BuildModelMatrix(obj));
+        m_geomShader->SetMat4("uModel", gview.get<TransformComponent>(e).Matrix());
         if (modelMesh) modelMesh->Draw();
         else           primMesh->Draw();
     }
@@ -1081,13 +1085,14 @@ void SceneRenderer::RenderSSR(const glm::mat4& projection) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-uint32_t SceneRenderer::Render(const std::vector<GameObject>& objects, int selectedIndex,
+uint32_t SceneRenderer::Render(Scene& scene, entt::entity selected,
     int width, int height,
     const glm::mat4& view, const glm::mat4& projection) {
     if (width <= 0 || height <= 0) return 0;
+    entt::registry& reg = scene.Reg();
 
     // Gather scene lights once per frame; applied to every lit shader.
-    std::vector<GpuLight> lights = CollectLights(objects);
+    std::vector<GpuLight> lights = CollectLights(scene);
 
     // Pick a single shadow caster: prefer the first directional, else first spot.
     int shadowLight = -1;
@@ -1104,16 +1109,15 @@ uint32_t SceneRenderer::Render(const std::vector<GameObject>& objects, int selec
         // Fit a bounding sphere around all shadow-casting geometry (world AABBs).
         glm::vec3 bmin( 1e9f), bmax(-1e9f);
         bool any = false;
-        for (const auto& o : objects) {
-            bool hasMesh = (o.type == PrimitiveType::Model) ? !o.modelPath.empty()
-                                                            : (GetMeshForType(o.type) != nullptr);
-            if (!hasMesh) continue;
-            glm::mat4 m = BuildModelMatrix(o);
+        auto mview = reg.view<TransformComponent, MeshComponent>();
+        for (auto e : mview) {
+            const MeshComponent& mc = mview.get<MeshComponent>(e);
+            glm::mat4 m = mview.get<TransformComponent>(e).Matrix();
             for (int c = 0; c < 8; ++c) {
                 glm::vec4 corner(
-                    (c & 1) ? o.aabbMax[0] : o.aabbMin[0],
-                    (c & 2) ? o.aabbMax[1] : o.aabbMin[1],
-                    (c & 4) ? o.aabbMax[2] : o.aabbMin[2], 1.0f);
+                    (c & 1) ? mc.aabbMax.x : mc.aabbMin.x,
+                    (c & 2) ? mc.aabbMax.y : mc.aabbMin.y,
+                    (c & 4) ? mc.aabbMax.z : mc.aabbMin.z, 1.0f);
                 glm::vec3 w = glm::vec3(m * corner);
                 bmin = glm::min(bmin, w);
                 bmax = glm::max(bmax, w);
@@ -1137,7 +1141,7 @@ uint32_t SceneRenderer::Render(const std::vector<GameObject>& objects, int selec
                                          0.1f, 2.0f * radius + 10.0f);
             m_lightSpace = lproj * lview;
         }
-        RenderShadowPass(objects);
+        RenderShadowPass(scene);
     }
 
     // Point-light shadow caster: first point light gets a cube shadow map.
@@ -1149,13 +1153,13 @@ uint32_t SceneRenderer::Render(const std::vector<GameObject>& objects, int selec
     if (pointShadow >= 0) {
         pointPos = lights[pointShadow].pos;
         pointFar = glm::max(lights[pointShadow].range, 1.0f);
-        RenderPointShadowPass(objects, pointPos, pointFar);
+        RenderPointShadowPass(scene, pointPos, pointFar);
     }
 
     // ── View-space G-buffer prepass (shared by SSAO + SSR) ──────────────
     if (m_ssaoEnabled || m_ssrEnabled) {
         EnsureGBuffer(width, height);
-        RenderGBuffer(objects, view, projection);
+        RenderGBuffer(scene, view, projection);
         if (m_ssaoEnabled) RenderSSAO(projection);
     }
 
@@ -1236,18 +1240,22 @@ uint32_t SceneRenderer::Render(const std::vector<GameObject>& objects, int selec
     m_shader->SetVec2 ("uScreenSize",  screenSize);
     ApplyLights(m_shader, lights);
 
-    for (size_t i = 0; i < objects.size(); ++i) {
-        const GameObject& obj = objects[i];
+    auto renderView = reg.view<TransformComponent, MeshComponent>();
+    for (auto e : renderView) {
+        const MeshComponent& mc = renderView.get<MeshComponent>(e);
 
         // Resolve mesh first so hasTangents is known before setting uniforms
         PrimitiveMesh* primMesh  = nullptr;
         ModelMesh*     modelMesh = nullptr;
-        if (obj.type == PrimitiveType::Model)
-            modelMesh = GetOrLoadModel(obj.modelPath);
+        if (mc.kind == MeshKind::Model)
+            modelMesh = GetOrLoadModel(mc.modelPath);
         else
-            primMesh = GetMeshForType(obj.type);
+            primMesh = GetMeshForKind(mc.kind);
 
         if (!primMesh && !modelMesh) continue;
+
+        const MaterialComponent* matc = reg.try_get<MaterialComponent>(e);
+        std::string materialPath = matc ? matc->path : std::string();
 
         glm::vec3 color(kDefaultColor);
         float     metallic  = 0.0f;
@@ -1257,8 +1265,8 @@ uint32_t SceneRenderer::Render(const std::vector<GameObject>& objects, int selec
         Texture*  normalTex = nullptr;
         Texture*  mrTex     = nullptr;
 
-        if (!obj.materialPath.empty()) {
-            Material* mat = MaterialManager::GetOrLoad(obj.materialPath);
+        if (!materialPath.empty()) {
+            Material* mat = MaterialManager::GetOrLoad(materialPath);
             if (mat) {
                 color     = glm::vec3(mat->color[0], mat->color[1], mat->color[2]);
                 metallic  = mat->metallic;
@@ -1275,8 +1283,8 @@ uint32_t SceneRenderer::Render(const std::vector<GameObject>& objects, int selec
         }
 
         const bool hasTangents = (modelMesh != nullptr);
-        glm::mat4 model = BuildModelMatrix(obj);
-        bool isSelected = (static_cast<int>(i) == selectedIndex);
+        glm::mat4 model = renderView.get<TransformComponent>(e).Matrix();
+        bool isSelected = (e == selected);
 
         // Stencil setup (same for both shader paths)
         if (isSelected) {
@@ -1288,8 +1296,8 @@ uint32_t SceneRenderer::Render(const std::vector<GameObject>& objects, int selec
         }
 
         // ── Node-compiled shader? ─────────────────────────────────────────
-        auto nodeIt = !obj.materialPath.empty()
-                    ? m_nodeShaders.find(obj.materialPath)
+        auto nodeIt = !materialPath.empty()
+                    ? m_nodeShaders.find(materialPath)
                     : m_nodeShaders.end();
 
         if (nodeIt != m_nodeShaders.end() && nodeIt->second.shader) {
@@ -1368,15 +1376,15 @@ uint32_t SceneRenderer::Render(const std::vector<GameObject>& objects, int selec
     if (m_env) m_env->RenderSkybox(view, projection);
     glStencilMask(0xFF);
 
-    if (selectedIndex >= 0 && selectedIndex < static_cast<int>(objects.size())) {
-        const GameObject& sel = objects[selectedIndex];
+    if (reg.valid(selected) && reg.all_of<TransformComponent, MeshComponent>(selected)) {
+        const MeshComponent& mc = reg.get<MeshComponent>(selected);
 
         PrimitiveMesh* primMesh  = nullptr;
         ModelMesh*     modelMesh = nullptr;
-        if (sel.type == PrimitiveType::Model)
-            modelMesh = GetOrLoadModel(sel.modelPath);
+        if (mc.kind == MeshKind::Model)
+            modelMesh = GetOrLoadModel(mc.modelPath);
         else
-            primMesh = GetMeshForType(sel.type);
+            primMesh = GetMeshForKind(mc.kind);
 
         if (primMesh || modelMesh) {
             glStencilFunc(GL_NOTEQUAL, 1, 0xFF);
@@ -1384,7 +1392,7 @@ uint32_t SceneRenderer::Render(const std::vector<GameObject>& objects, int selec
             glStencilMask(0x00);
 
             m_outlineShader->Bind();
-            glm::mat4 model = BuildModelMatrix(sel);
+            glm::mat4 model = reg.get<TransformComponent>(selected).Matrix();
             m_outlineShader->SetMat4("uModel", model);
             m_outlineShader->SetMat4("uView", view);
             m_outlineShader->SetMat4("uProjection", projection);

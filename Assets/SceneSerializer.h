@@ -1,10 +1,9 @@
 #pragma once
 #include <string>
-#include <vector>
-#include "../Scene/GameObject.h"
+#include "../Scene/Scene.h"
 
 class SceneSerializer {
 public:
-    static bool Save(const std::string& path, const std::vector<GameObject>& objects);
-    static bool Load(const std::string& path, std::vector<GameObject>& outObjects);
+    static bool Save(const std::string& path, const Scene& scene);
+    static bool Load(const std::string& path, Scene& scene);
 };

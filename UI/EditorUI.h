@@ -9,7 +9,8 @@
 #include <string>
 #include <vector>
 #include <unordered_set>
-#include "../Scene/GameObject.h"
+#include <unordered_map>
+#include "../Scene/Scene.h"
 #include "../Renderer/EditorCamera.h"
 
 struct AssetItem {
@@ -20,6 +21,7 @@ struct AssetItem {
 };
 
 class SceneRenderer;
+class LuaScripting;
 
 struct ConsoleMessage {
     enum Type { Info, Warning, Error, Success };
@@ -27,6 +29,8 @@ struct ConsoleMessage {
     std::string text;
     std::string timestamp;
 };
+
+enum class PlayState { Editing, Playing, Paused };
 
 class EditorUI {
 public:
@@ -39,8 +43,7 @@ public:
 
     void AddGameObject(const std::string& name, PrimitiveType type = PrimitiveType::Empty);
     void AddModelObject(const std::string& emdlPath);
-    void SelectGameObject(int index);
-    GameObject* GetSelectedObject();
+    void SelectEntity(entt::entity e);
 
     void LogInfo(const std::string& message);
     void LogWarning(const std::string& message);
@@ -60,12 +63,19 @@ private:
     void RenderTitleBar();
     void RenderViewportToolbar();    // icon-only bar above the viewport (play/render/settings)
     void RenderViewportTimeline();   // placeholder timeline strip below the viewport
+
+    // Play mode
+    void EnterPlayMode();
+    void ExitPlayMode();
+    void TogglePause();
+    void UpdatePlayMode();           // per-frame game update while playing
     void RenderAssetBrowser();
-    void RenderGameObjectNode(GameObject& obj, int index);
+    void RenderEntityNode(entt::entity e);
+    entt::entity DuplicateEntity(entt::entity src);
 
     static constexpr float kViewportToolbarH  = 38.0f;
     static constexpr float kViewportTimelineH = 96.0f;
-    void RenderTransformEditor(GameObject* obj);
+    void RenderTransformEditor(entt::entity e);
     void RenderUnsavedChangesDialog();
     void RequestClose();   // X/Exit: prompt if dirty, else close
     void AddConsoleMessage(const std::string& message, ConsoleMessage::Type type);
@@ -76,8 +86,7 @@ private:
     SceneRenderer* m_sceneRenderer = nullptr;
     EditorCamera m_camera;
     float m_viewportDragAccum = 0.0f;
-    std::vector<GameObject> m_gameObjects;
-    int m_selectedObjectIndex = -1;
+    entt::entity m_selected = entt::null;
     std::vector<ConsoleMessage> m_consoleMessages;
     bool m_autoScrollConsole = true;
     bool m_shouldAutoScroll = false;
@@ -104,8 +113,18 @@ private:
     bool m_showUnsavedChangesDialog = false;
     std::string m_currentScenePath;
 
+    // The ECS registry is the editor's single source of truth.
+    Scene                       m_scene;
+
+    // Play mode
+    PlayState               m_playState = PlayState::Editing;
+    Scene                   m_playBackup;          // full snapshot, restored on Stop
+    std::unordered_map<entt::entity, entt::entity> m_playMap;   // live entity → backup entity
+    float                   m_playTime = 0.0f;
+
     MaterialPreviewRenderer* m_previewRenderer = nullptr;
     MaterialNodeEditor*      m_nodeEditor      = nullptr;
+    LuaScripting*            m_lua             = nullptr;
 
 public:
     bool m_pendingMinimize = false;

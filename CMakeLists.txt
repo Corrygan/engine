@@ -16,6 +16,7 @@ add_executable(Engine
     UI/MaterialNodeEditor.cpp
 
     Core/Guid.cpp
+    Scene/Scene.cpp
     Assets/MetaFile.cpp
     Assets/AssetDatabase.cpp
     Assets/SceneSerializer.cpp
@@ -37,6 +38,8 @@ add_executable(Engine
     Renderer/MaterialGraph.cpp
     Renderer/NodeCompiler.cpp
     Renderer/EnvironmentMap.cpp
+
+    Scripting/LuaScripting.cpp
 
     imnodes/imnodes.cpp
 
@@ -64,11 +67,19 @@ target_include_directories(Engine PRIVATE
 
 find_package(OpenGL REQUIRED)
 find_package(assimp CONFIG REQUIRED)
+find_package(Lua REQUIRED)
+find_package(sol2 CONFIG REQUIRED)
+find_package(EnTT CONFIG REQUIRED)
+
+target_include_directories(Engine PRIVATE ${LUA_INCLUDE_DIR})
 
 target_link_libraries(Engine PRIVATE
     ${CMAKE_SOURCE_DIR}/lib/lib/glfw3.lib
     OpenGL::GL
     assimp::assimp
+    ${LUA_LIBRARIES}
+    sol2::sol2
+    EnTT::EnTT
     Comdlg32
     Shell32
 )
