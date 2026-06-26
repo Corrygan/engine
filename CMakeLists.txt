@@ -95,6 +95,7 @@ add_library(EngineAssets STATIC
     Assets/AssetDatabase.cpp
     Assets/SceneSerializer.cpp
     Assets/ModelImporter.cpp
+    Assets/ProjectFile.cpp
 )
 target_link_libraries(EngineAssets PUBLIC EngineScene PRIVATE assimp::assimp)
 
@@ -135,6 +136,7 @@ target_link_libraries(Engine PRIVATE
     OpenGL::GL
     Comdlg32
     Shell32
+    Dwmapi
 )
 target_compile_definitions(Engine PRIVATE ENGINE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 set_target_properties(Engine PROPERTIES

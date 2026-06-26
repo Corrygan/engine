@@ -40,6 +40,37 @@ struct SceneSnapshot {
     entt::entity selected = entt::null;
 };
 
+// An open scene "document". Several can be open at once; you switch between them
+// like browser tabs and only the active one is shown/edited. Each keeps its own
+// scene + selection + undo history. The ACTIVE document's state lives live in the
+// editor's m_scene/m_selected/undo members; the fields below stash an INACTIVE
+// document's state until it's switched back in.
+struct SceneDoc {
+    uint32_t    id    = 0;
+    std::string name  = "Untitled";
+    std::string path;                 // .escn on disk; empty if never saved
+    bool        dirty = false;
+
+    Scene                      scene;             // stashed registry (inactive only)
+    entt::entity               selected = entt::null;
+    std::vector<SceneSnapshot> undoStack;
+    std::vector<SceneSnapshot> redoStack;
+    SceneSnapshot              baseline;
+    uint64_t                   sceneRevision    = 0;
+    uint64_t                   baselineRevision = 0;
+};
+
+// A project: the top-level container (a .fcproj file + a folder of assets).
+// Scenes and other assets live inside it; the asset browser is rooted here.
+struct Project {
+    std::string file;               // absolute path to the .fcproj
+    std::string dir;                // project root directory
+    std::string name;               // display name
+    std::string assetSub = "Assets";// asset subfolder (relative to dir)
+    std::string assetDir;           // absolute asset folder (dir/assetSub)
+    std::string startupScene;       // scene opened on load (relative to dir, optional)
+};
+
 class EditorUI {
 public:
     EditorUI();
@@ -52,6 +83,8 @@ public:
     void AddGameObject(const std::string& name, PrimitiveType type = PrimitiveType::Empty);
     void AddModelObject(const std::string& emdlPath);
     void SelectEntity(entt::entity e);
+
+    bool LoadProject(const std::string& fcprojPath);   // called by the launcher + File menu
 
     void LogInfo(const std::string& message);
     void LogWarning(const std::string& message);
@@ -71,6 +104,7 @@ private:
     void RenderTitleBar();
     void RenderViewportToolbar();    // icon-only bar above the viewport (play/render/settings)
     void RenderViewportTimeline();   // placeholder timeline strip below the viewport
+    void RenderSceneTabs();          // browser-style scene tabs at the top of the viewport
 
     // Play mode
     void EnterPlayMode();
@@ -86,9 +120,24 @@ private:
     static constexpr float kViewportTimelineH = 96.0f;
     void RenderTransformEditor(entt::entity e);
     void RenderUnsavedChangesDialog();
+    void RenderCloseSceneDialog();             // per-scene close confirmation
+    void RequestCloseDocument(uint32_t id);    // prompt if dirty, else close
+
+    // Projects (in-editor switching; the launcher window opens the first one).
+    bool CreateProject(const std::string& fcprojPath, const std::string& name);
     void RequestClose();   // X/Exit: prompt if dirty, else close
     void AddConsoleMessage(const std::string& message, ConsoleMessage::Type type);
     bool SaveCurrentScene();
+
+    // Multi-scene documents (tab switching; one active/visible at a time).
+    SceneDoc* FindDoc(uint32_t id);
+    SceneDoc& ActiveDoc();
+    uint32_t  NewDocument(const std::string& name = "Untitled");
+    void      SwitchTo(uint32_t id);             // stash active state, load target's
+    bool      SaveDocument(uint32_t id, bool saveAs = false);
+    void      CloseDocument(uint32_t id);
+    void      OpenScene(const std::string& path);
+    bool      AnyDocDirty() const;
 
     // Undo/redo — snapshot transactions with per-gesture coalescing.
     void          MarkDirty();             // registry changed: set dirty + bump revision
@@ -128,12 +177,23 @@ private:
     bool                    m_assetBrowserDirty    = true;
     std::unordered_set<std::string> m_compiledGraphs;   // node materials already precompiled
 
-    bool m_sceneDirty = false;
+    bool m_sceneDirty = false;            // any open document has unsaved changes
     bool m_showUnsavedChangesDialog = false;
-    std::string m_currentScenePath;
 
     // The ECS registry is the editor's single source of truth.
     Scene                       m_scene;
+
+    // Open scene documents (browser-style tabs; one active at a time). The active
+    // doc's scene/selection/undo are live in m_scene/m_selected/undo members; the
+    // others are stashed in their SceneDoc until switched back in.
+    std::vector<SceneDoc>       m_docs;
+    uint32_t                    m_activeDoc   = 0;
+    uint32_t                    m_nextDocId   = 1;
+    uint32_t                    m_tabSelectId   = 0;   // request the tab bar to select this doc
+    uint32_t                    m_closePromptDoc = 0;  // doc awaiting close confirmation
+
+    // Project (the currently-open project; set by LoadProject)
+    Project                     m_project;
 
     // Play mode
     PlayState               m_playState = PlayState::Editing;

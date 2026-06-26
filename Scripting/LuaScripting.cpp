@@ -8,8 +8,6 @@
 #include <tuple>
 
 namespace {
-    // Lightweight handle bound to scripts as `self`. Holds the registry + entity;
-    // the registry outlives a play session, so the handle stays valid throughout.
     struct LuaEntity {
         entt::registry* reg = nullptr;
         entt::entity    e   = entt::null;
@@ -44,13 +42,11 @@ LuaScripting::LuaScripting() {
     sol::state& lua = m_impl->lua;
     lua.open_libraries(sol::lib::base, sol::lib::math, sol::lib::string, sol::lib::table);
 
-    // Engine API: console logging.
     lua.set_function("log", [this](sol::object v) {
         Log(v.is<std::string>() ? v.as<std::string>()
                                 : sol::state_view(v.lua_state())["tostring"](v).get<std::string>());
     });
 
-    // Entity handle (`self`).
     lua.new_usertype<LuaEntity>("Entity",
         "getName", [](LuaEntity& e) { return e.name(); },
         "getPos",  [](LuaEntity& e) {

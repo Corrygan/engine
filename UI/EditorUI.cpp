@@ -20,6 +20,9 @@
 #include "../Renderer/TextureManager.h"
 #include "../Renderer/Picking.h"
 #include "../Jobs/JobSystem.h"
+#include "../Core/Branding.h"
+#include "../Assets/ProjectFile.h"
+#include "EditorStyle.h"
 #include "ImGuizmo.h"
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -28,6 +31,7 @@
 #include <sstream>
 #include <iomanip>
 #include <filesystem>
+#include <fstream>
 #include <algorithm>
 #include <unordered_set>
 #include <cstdint>
@@ -309,8 +313,8 @@ namespace {
         ofn.lStructSize  = sizeof(ofn);
         ofn.lpstrFile    = fileName;
         ofn.nMaxFile     = MAX_PATH;
-        ofn.lpstrFilter  = "Engine Scene\0*.escn\0All Files\0*.*\0";
-        ofn.lpstrDefExt  = "escn";
+        ofn.lpstrFilter  = "Force Scene\0*.fcscn;*.escn\0All Files\0*.*\0";
+        ofn.lpstrDefExt  = "fcscn";
         ofn.nFilterIndex = 1;
         ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
         return GetOpenFileNameA(&ofn) ? std::string(fileName) : "";
@@ -322,8 +326,34 @@ namespace {
         ofn.lStructSize  = sizeof(ofn);
         ofn.lpstrFile    = fileName;
         ofn.nMaxFile     = MAX_PATH;
-        ofn.lpstrFilter  = "Engine Scene\0*.escn\0All Files\0*.*\0";
-        ofn.lpstrDefExt  = "escn";
+        ofn.lpstrFilter  = "Force Scene\0*.fcscn\0All Files\0*.*\0";
+        ofn.lpstrDefExt  = "fcscn";
+        ofn.nFilterIndex = 1;
+        ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
+        return GetSaveFileNameA(&ofn) ? std::string(fileName) : "";
+    }
+
+    std::string OpenProjectFileDialog() {
+        OPENFILENAMEA ofn{};
+        char fileName[MAX_PATH] = "";
+        ofn.lStructSize  = sizeof(ofn);
+        ofn.lpstrFile    = fileName;
+        ofn.nMaxFile     = MAX_PATH;
+        ofn.lpstrFilter  = "Force Project\0*.fcproj\0All Files\0*.*\0";
+        ofn.lpstrDefExt  = "fcproj";
+        ofn.nFilterIndex = 1;
+        ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
+        return GetOpenFileNameA(&ofn) ? std::string(fileName) : "";
+    }
+
+    std::string SaveProjectFileDialog() {
+        OPENFILENAMEA ofn{};
+        char fileName[MAX_PATH] = "";
+        ofn.lStructSize  = sizeof(ofn);
+        ofn.lpstrFile    = fileName;
+        ofn.nMaxFile     = MAX_PATH;
+        ofn.lpstrFilter  = "Force Project\0*.fcproj\0All Files\0*.*\0";
+        ofn.lpstrDefExt  = "fcproj";
         ofn.nFilterIndex = 1;
         ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
         return GetSaveFileNameA(&ofn) ? std::string(fileName) : "";
@@ -354,6 +384,8 @@ bool EditorUI::Initialize(GLFWwindow* window) {
     LogInfo("Job system: " + std::to_string(jobs::JobSystem::Get().WorkerCount())
             + " worker threads");
 
+    NewDocument("Untitled");   // always have one active scene document
+
     // When a material is renamed in the node editor, re-point objects + UI.
     m_nodeEditor->SetRenameHandler([this](const std::string& oldP, const std::string& newP) {
         for (auto [e, mc] : m_scene.Reg().view<MaterialComponent>().each())
@@ -374,102 +406,7 @@ bool EditorUI::Initialize(GLFWwindow* window) {
         }
     });
 
-    std::filesystem::create_directories("Assets");
-    AssetDatabase::ScanFolder("Assets");
-
-    ImGui::StyleColorsDark();
-
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.Colors[ImGuiCol_CheckMark] = ImVec4(1.0f, 1.0f, 1.0f, 0.90f);
-
-    style.WindowRounding    = 0.0f;
-    style.ChildRounding     = 6.0f;
-    style.FrameRounding     = 4.0f;
-    style.PopupRounding     = 6.0f;
-    style.ScrollbarRounding = 4.0f;
-    style.GrabRounding      = 4.0f;
-    style.TabRounding       = 5.0f;
-
-    style.WindowBorderSize  = 1.0f;
-    style.FrameBorderSize   = 1.0f;
-    style.PopupBorderSize   = 1.0f;
-    style.ChildBorderSize   = 1.0f;
-
-    style.WindowPadding     = ImVec2(12.0f, 10.0f);
-    style.FramePadding      = ImVec2(8.0f,  5.0f);
-    style.ItemSpacing       = ImVec2(8.0f,  6.0f);
-    style.ItemInnerSpacing  = ImVec2(6.0f,  6.0f);
-    style.IndentSpacing     = 16.0f;
-    style.ScrollbarSize     = 11.0f;
-    style.GrabMinSize       = 10.0f;
-    style.WindowMenuButtonPosition = ImGuiDir_None;
-
-    const ImVec4 bg0    = ImVec4(0.118f, 0.118f, 0.118f, 1.00f);
-    const ImVec4 bg1    = ImVec4(0.145f, 0.145f, 0.149f, 1.00f);
-    const ImVec4 bg2    = ImVec4(0.235f, 0.235f, 0.235f, 1.00f);
-    const ImVec4 bg3    = ImVec4(0.282f, 0.282f, 0.282f, 1.00f);
-    const ImVec4 bg4    = ImVec4(0.322f, 0.322f, 0.322f, 1.00f);
-    const ImVec4 popup  = ImVec4(0.157f, 0.157f, 0.161f, 1.00f);
-    const ImVec4 acc    = ImVec4(0.753f, 0.212f, 0.298f, 1.00f);
-    const ImVec4 accH   = ImVec4(0.816f, 0.267f, 0.369f, 1.00f);
-    const ImVec4 accA   = ImVec4(0.659f, 0.157f, 0.251f, 1.00f);
-    const ImVec4 accDim = ImVec4(0.753f, 0.212f, 0.298f, 0.22f);
-    const ImVec4 txt    = ImVec4(0.800f, 0.800f, 0.800f, 1.00f);
-    const ImVec4 txtD   = ImVec4(0.522f, 0.522f, 0.522f, 1.00f);
-    const ImVec4 brd    = ImVec4(1.000f, 1.000f, 1.000f, 0.10f);
-    const ImVec4 brdS   = ImVec4(0.000f, 0.000f, 0.000f, 0.00f);
-
-    ImVec4* c = style.Colors;
-    c[ImGuiCol_Text]                 = txt;
-    c[ImGuiCol_TextDisabled]         = txtD;
-    c[ImGuiCol_WindowBg]             = bg0;
-    c[ImGuiCol_ChildBg]              = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
-    c[ImGuiCol_PopupBg]              = popup;
-    c[ImGuiCol_ModalWindowDimBg]     = ImVec4(0.0f, 0.0f, 0.0f, 0.62f);
-    c[ImGuiCol_Border]               = brd;
-    c[ImGuiCol_BorderShadow]         = brdS;
-    c[ImGuiCol_FrameBg]              = bg2;
-    c[ImGuiCol_FrameBgHovered]       = bg3;
-    c[ImGuiCol_FrameBgActive]        = ImVec4(0.45f, 0.45f, 0.45f, 1.0f);
-    c[ImGuiCol_TitleBg]              = bg1;
-    c[ImGuiCol_TitleBgActive]        = bg1;
-    c[ImGuiCol_TitleBgCollapsed]     = bg1;
-    c[ImGuiCol_MenuBarBg]            = bg1;
-    c[ImGuiCol_ScrollbarBg]          = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
-    c[ImGuiCol_ScrollbarGrab]        = bg3;
-    c[ImGuiCol_ScrollbarGrabHovered] = bg4;
-    c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.40f, 0.40f, 0.40f, 1.0f);
-    c[ImGuiCol_CheckMark]            = ImVec4(1.0f, 1.0f, 1.0f, 0.90f);
-    c[ImGuiCol_CheckboxSelectedBg]   = bg2;
-    c[ImGuiCol_SliderGrab]           = acc;
-    c[ImGuiCol_SliderGrabActive]     = accA;
-    c[ImGuiCol_Button]               = bg2;
-    c[ImGuiCol_ButtonHovered]        = bg3;
-    c[ImGuiCol_ButtonActive]         = bg4;
-    c[ImGuiCol_Header]               = accDim;
-    c[ImGuiCol_HeaderHovered]        = ImVec4(acc.x, acc.y, acc.z, 0.35f);
-    c[ImGuiCol_HeaderActive]         = ImVec4(acc.x, acc.y, acc.z, 0.50f);
-    c[ImGuiCol_Separator]            = ImVec4(1.0f, 1.0f, 1.0f, 0.12f);
-    c[ImGuiCol_SeparatorHovered]     = accH;
-    c[ImGuiCol_SeparatorActive]      = acc;
-    c[ImGuiCol_ResizeGrip]           = ImVec4(acc.x, acc.y, acc.z, 0.20f);
-    c[ImGuiCol_ResizeGripHovered]    = ImVec4(acc.x, acc.y, acc.z, 0.50f);
-    c[ImGuiCol_ResizeGripActive]     = ImVec4(acc.x, acc.y, acc.z, 0.80f);
-    c[ImGuiCol_Tab]                  = bg1;
-    c[ImGuiCol_TabHovered]           = bg3;
-    c[ImGuiCol_TabSelected]          = bg0;
-    c[ImGuiCol_TabDimmed]            = bg1;
-    c[ImGuiCol_TabDimmedSelected]    = bg2;
-    c[ImGuiCol_DockingPreview]       = ImVec4(acc.x, acc.y, acc.z, 0.40f);
-    c[ImGuiCol_DockingEmptyBg]       = bg1;
-    c[ImGuiCol_PlotLines]            = acc;
-    c[ImGuiCol_PlotLinesHovered]     = accH;
-    c[ImGuiCol_PlotHistogram]        = acc;
-    c[ImGuiCol_PlotHistogramHovered] = accH;
-    c[ImGuiCol_TableHeaderBg]        = bg2;
-    c[ImGuiCol_TableBorderStrong]    = brd;
-    c[ImGuiCol_TableBorderLight]     = ImVec4(1.0f, 1.0f, 1.0f, 0.05f);
-    c[ImGuiCol_NavHighlight]         = acc;
+    ApplyEngineStyle();
 
     ImGuizmo::Style& gs = ImGuizmo::GetStyle();
     gs.Colors[ImGuizmo::DIRECTION_X]      = ImVec4(0.86f, 0.24f, 0.24f, 1.00f);
@@ -525,6 +462,7 @@ void EditorUI::Render() {
 
     if (m_nodeEditor) m_nodeEditor->Render();
     RenderUnsavedChangesDialog();
+    RenderCloseSceneDialog();
 
     // Undo/redo: keyboard shortcuts + per-gesture snapshot coalescing. Done at
     // the end of the frame so ImGui's interaction state reflects this frame.
@@ -559,16 +497,25 @@ void EditorUI::RenderTitleBar() {
         IM_COL32(255, 255, 255, 20));
 
     float textY = wPos.y + (kTitleH - ImGui::GetTextLineHeight()) * 0.5f;
-    dl->AddCircleFilled(ImVec2(wPos.x + 20.0f, wPos.y + kTitleH * 0.5f), 4.5f,
-        IM_COL32(192, 54, 76, 255));
+    {
+        // Brand mark: branding/icon.png if present, else a crimson placeholder.
+        float  cy = wPos.y + kTitleH * 0.5f;
+        ImVec2 p0(wPos.x + 12.0f, cy - 8.0f), p1(wPos.x + 28.0f, cy + 8.0f);
+        Texture* logo = TextureManager::GetOrLoad(branding::kIconPath);
+        if (logo && logo->GetID())
+            dl->AddImage((ImTextureID)(intptr_t)logo->GetID(), p0, p1, ImVec2(0, 1), ImVec2(1, 0));
+        else
+            dl->AddRectFilled(p0, p1, IM_COL32(branding::kAccentR, branding::kAccentG,
+                                               branding::kAccentB, 255), 4.0f);
+    }
     dl->AddText(ImVec2(wPos.x + 32.0f, textY),
-        IM_COL32(210, 210, 220, 255), "Engine");
+        IM_COL32(210, 210, 220, 255), branding::kAppName);
 
-    if (!m_currentScenePath.empty() || m_sceneDirty) {
-        std::string label = m_currentScenePath.empty()
-            ? "Untitled"
-            : std::filesystem::path(m_currentScenePath).filename().string();
-        if (m_sceneDirty) label = "\xe2\x80\xa2 " + label;
+    {
+        SceneDoc& doc = ActiveDoc();
+        std::string label = doc.name.empty() ? "Untitled" : doc.name;
+        if (doc.dirty) label = "\xe2\x80\xa2 " + label;
+        if (m_docs.size() > 1) label += "   (" + std::to_string(m_docs.size()) + " scenes)";
         ImVec2 tsz = ImGui::CalcTextSize(label.c_str());
         dl->AddText(
             ImVec2(wPos.x + (wW - tsz.x) * 0.5f, textY),
@@ -844,30 +791,28 @@ void EditorUI::RenderMenuBar() {
     MenuBtn("File", "##mFile");
     ImGui::SetNextWindowPos(popupPos, ImGuiCond_Always);
     if (ImGui::BeginPopup("##mFile", ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar)) {
-        if (RMenuItem("New Scene",        "Ctrl+N",        ImDrawFlags_RoundCornersTop)) {
-            m_scene.Clear(); m_objectCounter = 0;
-            m_selected = entt::null; m_currentScenePath.clear(); m_sceneDirty = false;
+        if (RMenuItem("New Project...",  nullptr, ImDrawFlags_RoundCornersTop)) {
+            std::string pf = SaveProjectFileDialog();
+            if (!pf.empty()) CreateProject(pf, std::filesystem::path(pf).stem().string());
+        }
+        if (MItem("Open Project...", nullptr)) {
+            std::string pf = OpenProjectFileDialog();
+            if (!pf.empty()) LoadProject(pf);
+        }
+        ImGui::Separator();
+        if (MItem("New Scene", "Ctrl+N")) {
+            NewDocument("Untitled");                       // adds a scene tab
             AddGameObject("Main Camera", PrimitiveType::Camera);
-            ClearUndoHistory();
+            m_selected = entt::null;
             LogSuccess("New scene created");
         }
         if (MItem("Open Scene", "Ctrl+O")) {
             std::string path = OpenSceneFileDialog();
-            if (!path.empty()) {
-                if (SceneSerializer::Load(path, m_scene)) {
-                    m_selected = entt::null;
-                    m_currentScenePath = path; m_sceneDirty = false;
-                    ClearUndoHistory();
-                    LogSuccess("Scene loaded: " + path);
-                } else { LogError("Failed to load scene: " + path); }
-            }
+            if (!path.empty()) OpenScene(path);            // opens in a new tab
         }
         ImGui::Separator();
         if (MItem("Save Scene",       "Ctrl+S"))       SaveCurrentScene();
-        if (MItem("Save Scene As...", "Ctrl+Shift+S")) {
-            std::string prev = m_currentScenePath; m_currentScenePath.clear();
-            if (!SaveCurrentScene()) m_currentScenePath = prev;
-        }
+        if (MItem("Save Scene As...", "Ctrl+Shift+S")) SaveDocument(m_activeDoc, true);
         ImGui::Separator();
         if (RMenuItem("Exit",    "Alt+F4", ImDrawFlags_RoundCornersBottom))
             RequestClose();
@@ -919,11 +864,31 @@ void EditorUI::RenderMenuBar() {
         ImGui::EndPopup();
     }
 
+    MenuBtn("Window", "##mWindow");
+    ImGui::SetNextWindowPos(popupPos, ImGuiCond_Always);
+    if (ImGui::BeginPopup("##mWindow", ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar)) {
+        ImGui::TextDisabled("Scenes");
+        ImGui::Separator();
+        for (SceneDoc& doc : m_docs) {
+            bool active = (doc.id == m_activeDoc);
+            std::string label = (doc.name.empty() ? "Untitled" : doc.name);
+            if (doc.dirty) label += " *";
+            label += "###win" + std::to_string(doc.id);
+            if (ImGui::MenuItem(label.c_str(), nullptr, active) && !active)
+                m_tabSelectId = doc.id;          // ask the viewport tab bar to switch
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("New Scene")) NewDocument("Untitled");
+        PopupCloseCheck();
+        ImGui::EndPopup();
+    }
+
     MenuBtn("Help", "##mHelp", false);
     ImGui::SetNextWindowPos(popupPos, ImGuiCond_Always);
     if (ImGui::BeginPopup("##mHelp", ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar)) {
         if (RMenuItem("About", nullptr, ImDrawFlags_RoundCornersAll))
-            LogInfo("Engine v0.1 - Built with C++ and ImGui");
+            LogInfo(std::string(branding::kAppName) + " v" + branding::kVersion
+                    + " - Built with C++ and ImGui");
         PopupCloseCheck();
         ImGui::EndPopup();
     }
@@ -954,7 +919,7 @@ void EditorUI::RenderAssetBrowser() {
         m_assetBrowserDirty = false;
         m_assetBrowserItems.clear();
         static const std::unordered_set<std::string> kAssetExts = {
-            ".emat", ".emdl", ".escn",
+            ".emat", ".emdl", ".fcscn", ".escn",
             ".png", ".jpg", ".jpeg", ".bmp", ".tga", ".hdr",
             ".obj", ".fbx", ".gltf", ".glb"
         };
@@ -1080,7 +1045,7 @@ void EditorUI::RenderAssetBrowser() {
             typeColor = {0.20f, 0.72f, 0.82f, 1.0f}; typeLabel = "MDL";
         } else if (item.ext==".obj"||item.ext==".fbx"||item.ext==".gltf"||item.ext==".glb") {
             typeColor = {0.90f, 0.52f, 0.12f, 1.0f}; typeLabel = "SRC";
-        } else if (item.ext == ".escn") {
+        } else if (item.ext == ".fcscn" || item.ext == ".escn") {
             typeColor = {0.62f, 0.32f, 0.92f, 1.0f}; typeLabel = "SCN";
         } else if (item.ext==".png"||item.ext==".jpg"||item.ext==".jpeg"||item.ext==".bmp") {
             typeColor = {0.90f, 0.80f, 0.12f, 1.0f}; typeLabel = "IMG";
@@ -1218,16 +1183,8 @@ void EditorUI::RenderAssetBrowser() {
                 AddModelObject(item.path);
             } else if (item.ext==".obj"||item.ext==".fbx"||item.ext==".gltf"||item.ext==".glb") {
                 ImportModelAsync(item.path);
-            } else if (item.ext == ".escn") {
-                if (SceneSerializer::Load(item.path, m_scene)) {
-                    m_selected = entt::null;
-                    m_currentScenePath = item.path;
-                    m_sceneDirty = false;
-                    ClearUndoHistory();
-                    LogSuccess("Scene loaded: " + item.name);
-                } else {
-                    LogError("Failed to load scene: " + item.name);
-                }
+            } else if (item.ext == ".fcscn" || item.ext == ".escn") {
+                OpenScene(item.path);
             } else if (item.ext == ".hdr") {
                 if (m_sceneRenderer) {
                     m_sceneRenderer->SetEnvironmentHDR(item.path);
@@ -1285,17 +1242,20 @@ void EditorUI::RenderHierarchy() {
 
     auto& reg = m_scene.Reg();
     auto  nameView = reg.view<NameComponent>();
-    ImGui::TextDisabled("%zu objects in scene", (size_t)nameView.size());
+    ImGui::TextDisabled("%s  \xc2\xb7  %zu objects",
+                        ActiveDoc().name.c_str(), (size_t)nameView.size());
     ImGui::Separator();
 
-    // Snapshot ids first: a Delete/Duplicate during iteration would otherwise
-    // mutate the pool we're walking.
+    // Only the active scene's objects are shown. Snapshot ids first so a
+    // Delete/Duplicate during iteration can't invalidate the view.
     std::vector<entt::entity> ents(nameView.begin(), nameView.end());
     for (entt::entity e : ents)
         if (m_scene.Valid(e)) RenderEntityNode(e);
 
     ImGui::Separator();
 
+    if (ImGui::Button("New Scene")) NewDocument("Untitled");
+    ImGui::SameLine();
     if (ImGui::Button("Add Object")) {
         std::string sourcePath = OpenModelFileDialog();
         if (!sourcePath.empty())
@@ -1644,10 +1604,44 @@ void EditorUI::RenderViewportTimeline() {
     ImGui::PopStyleColor();
 }
 
+void EditorUI::RenderSceneTabs() {
+    ImGuiTabBarFlags barFlags = ImGuiTabBarFlags_Reorderable
+                              | ImGuiTabBarFlags_AutoSelectNewTabs
+                              | ImGuiTabBarFlags_FittingPolicyScroll;
+    if (!ImGui::BeginTabBar("##scenetabs", barFlags)) return;
+
+    uint32_t selected = 0;   // doc id whose tab ImGui has selected this frame
+    uint32_t closeReq  = 0;
+    for (SceneDoc& doc : m_docs) {
+        std::string label = doc.name.empty() ? "Untitled" : doc.name;
+        if (doc.dirty) label += " *";
+        label += "###tab" + std::to_string(doc.id);   // stable id; visible text may change
+
+        ImGuiTabItemFlags itemFlags = ImGuiTabItemFlags_None;
+        if (m_tabSelectId == doc.id) itemFlags |= ImGuiTabItemFlags_SetSelected;
+
+        bool open = true;
+        if (ImGui::BeginTabItem(label.c_str(), &open, itemFlags)) {
+            selected = doc.id;
+            ImGui::EndTabItem();
+        }
+        if (!open) closeReq = doc.id;
+    }
+    m_tabSelectId = 0;   // consume the programmatic-select request
+
+    ImGui::EndTabBar();
+
+    if (selected && selected != m_activeDoc) SwitchTo(selected);   // user clicked a tab
+    if (closeReq) RequestCloseDocument(closeReq);                  // prompt if unsaved
+}
+
 void EditorUI::RenderViewport() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
     ImGui::Begin("Viewport", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleVar();
+
+    // Browser-style scene tabs at the very top.
+    RenderSceneTabs();
 
     // Icon toolbar above the 3D view (play / render / settings).
     RenderViewportToolbar();
@@ -2433,28 +2427,201 @@ void EditorUI::RenderConsole() {
     ImGui::End();
 }
 
-bool EditorUI::SaveCurrentScene() {
-    std::string path = m_currentScenePath;
-    if (path.empty()) {
+// ── Multi-scene documents ────────────────────────────────────────────────────
+SceneDoc* EditorUI::FindDoc(uint32_t id) {
+    for (auto& d : m_docs) if (d.id == id) return &d;
+    return nullptr;
+}
+
+SceneDoc& EditorUI::ActiveDoc() {
+    if (SceneDoc* d = FindDoc(m_activeDoc)) return *d;
+    if (m_docs.empty()) NewDocument();
+    m_activeDoc = m_docs.front().id;
+    return m_docs.front();
+}
+
+bool EditorUI::AnyDocDirty() const {
+    for (const auto& d : m_docs) if (d.dirty) return true;
+    return false;
+}
+
+uint32_t EditorUI::NewDocument(const std::string& name) {
+    SceneDoc doc;
+    doc.id   = m_nextDocId++;
+    doc.name = name;
+    uint32_t id = doc.id;
+    m_docs.push_back(std::move(doc));        // its scene/undo start empty
+
+    if (m_docs.size() == 1) {
+        m_activeDoc = id;                    // first doc: adopt the empty working set
+        ClearUndoHistory();
+    } else {
+        SwitchTo(id);                        // stash current, make the new empty doc active
+    }
+    return id;
+}
+
+void EditorUI::SwitchTo(uint32_t id) {
+    if (id == m_activeDoc) return;
+    if (!FindDoc(id))      return;
+    if (m_playState != PlayState::Editing) ExitPlayMode();   // switching stops the game
+
+    // Stash the live working set into the currently-active document.
+    if (SceneDoc* cur = FindDoc(m_activeDoc)) {
+        cur->scene            = std::move(m_scene);
+        cur->selected         = m_selected;
+        cur->undoStack        = std::move(m_undoStack);
+        cur->redoStack        = std::move(m_redoStack);
+        cur->baseline         = std::move(m_baseline);
+        cur->sceneRevision    = m_sceneRevision;
+        cur->baselineRevision = m_baselineRevision;
+    }
+    // Load the target document's state into the live working set.
+    SceneDoc* nxt = FindDoc(id);
+    m_scene            = std::move(nxt->scene);
+    m_selected         = nxt->selected;
+    m_undoStack        = std::move(nxt->undoStack);
+    m_redoStack        = std::move(nxt->redoStack);
+    m_baseline         = std::move(nxt->baseline);
+    m_sceneRevision    = nxt->sceneRevision;
+    m_baselineRevision = nxt->baselineRevision;
+    m_activeDoc        = id;
+}
+
+void EditorUI::OpenScene(const std::string& path) {
+    // If it's already open, just switch to its tab.
+    if (!path.empty())
+        for (auto& d : m_docs)
+            if (d.path == path) { SwitchTo(d.id); return; }
+
+    Scene loaded;
+    if (!SceneSerializer::Load(path, loaded)) {
+        LogError("Failed to load scene: " + path);
+        return;
+    }
+    uint32_t id = NewDocument(std::filesystem::path(path).stem().string());  // new active doc
+    m_scene    = std::move(loaded);                                          // becomes its scene
+    m_selected = entt::null;
+    if (SceneDoc* doc = FindDoc(id)) { doc->path = path; doc->dirty = false; }
+    ClearUndoHistory();                 // baseline = the freshly loaded scene
+    m_sceneDirty = AnyDocDirty();
+    LogSuccess("Scene loaded: " + path);
+}
+
+bool EditorUI::SaveDocument(uint32_t id, bool saveAs) {
+    SceneDoc* doc = FindDoc(id);
+    if (!doc) return false;
+
+    std::string path = doc->path;
+    if (saveAs || path.empty()) {
         path = SaveSceneFileDialog();
         if (path.empty()) return false;
     }
     std::filesystem::create_directories(std::filesystem::path(path).parent_path());
-    if (!SceneSerializer::Save(path, m_scene)) {
+
+    // The active document's scene is live in m_scene; inactive ones are stashed.
+    Scene& sc = (id == m_activeDoc) ? m_scene : doc->scene;
+    if (!SceneSerializer::Save(path, sc)) {
         LogError("Failed to save scene: " + path);
         return false;
     }
     AssetDatabase::GetOrCreateGuid(path, "Scene");
-    m_currentScenePath = path;
-    m_sceneDirty = false;
+    doc->path    = path;
+    doc->name    = std::filesystem::path(path).stem().string();
+    doc->dirty   = false;
+    m_sceneDirty = AnyDocDirty();
     LogSuccess("Scene saved: " + path);
     return true;
+}
+
+void EditorUI::CloseDocument(uint32_t id) {
+    if (!FindDoc(id)) return;
+
+    // Last document: reset it to an empty Untitled instead of removing it, so the
+    // editor always has one active scene.
+    if (m_docs.size() == 1) {
+        m_scene    = Scene();
+        m_selected = entt::null;
+        if (SceneDoc* d = FindDoc(id)) { d->path.clear(); d->name = "Untitled"; d->dirty = false; }
+        ClearUndoHistory();
+        m_sceneDirty = false;
+        LogInfo("Scene closed");
+        return;
+    }
+
+    // If closing the active tab, switch to a neighbour first so the live working
+    // set is valid; the closed doc then owns its entities in its stashed scene.
+    if (id == m_activeDoc) {
+        uint32_t other = 0;
+        for (auto& d : m_docs) if (d.id != id) { other = d.id; break; }
+        SwitchTo(other);
+    }
+    m_docs.erase(std::remove_if(m_docs.begin(), m_docs.end(),
+                 [id](const SceneDoc& d) { return d.id == id; }), m_docs.end());
+    m_sceneDirty = AnyDocDirty();
+    LogInfo("Scene closed");
+}
+
+bool EditorUI::SaveCurrentScene() {
+    return SaveDocument(m_activeDoc);
+}
+
+// ── Projects ─────────────────────────────────────────────────────────────────
+bool EditorUI::LoadProject(const std::string& fcprojPath) {
+    namespace fs = std::filesystem;
+    projects::Info info;
+    if (!projects::Parse(fcprojPath, info)) {
+        LogError("Cannot open project: " + fcprojPath);
+        return false;
+    }
+
+    Project p;
+    p.file         = fs::absolute(fcprojPath).string();
+    p.dir          = fs::path(p.file).parent_path().string();
+    p.name         = info.name;
+    p.assetSub     = info.assetSub;
+    p.startupScene = info.startupScene;
+    p.assetDir     = (fs::path(p.dir) / p.assetSub).string();
+    std::error_code ec; fs::create_directories(p.assetDir, ec);
+
+    m_project = p;
+
+    // Root the asset pipeline at the project.
+    m_assetBrowserPath  = p.assetDir;
+    m_assetBrowserDirty = true;
+    AssetDatabase::ScanFolder(p.assetDir);
+    projects::AddRecent(p.file);
+
+    // Start from a clean single scene (or the project's startup scene).
+    m_docs.clear();
+    m_activeDoc = 0; m_nextDocId = 1;
+    m_scene = Scene(); m_selected = entt::null;
+    m_undoStack.clear(); m_redoStack.clear(); m_baseline = SceneSnapshot();
+    m_sceneRevision = 0; m_baselineRevision = 0;
+    m_sceneDirty = false;
+    NewDocument("Untitled");
+    if (!p.startupScene.empty()) {
+        std::string scenePath = (fs::path(p.dir) / p.startupScene).string();
+        if (fs::exists(scenePath)) OpenScene(scenePath);
+    }
+
+    LogSuccess("Project loaded: " + p.name);
+    return true;
+}
+
+bool EditorUI::CreateProject(const std::string& fcprojPath, const std::string& name) {
+    if (!projects::Create(fcprojPath, name)) {
+        LogError("Cannot create project: " + fcprojPath);
+        return false;
+    }
+    return LoadProject(fcprojPath);
 }
 
 // ── Undo/redo ───────────────────────────────────────────────────────────────
 void EditorUI::MarkDirty() {
     m_sceneDirty = true;
     ++m_sceneRevision;
+    if (SceneDoc* a = FindDoc(m_activeDoc)) a->dirty = true;  // edits target the active scene
 }
 
 SceneSnapshot EditorUI::CaptureSnapshot() {
@@ -2573,8 +2740,13 @@ void EditorUI::RenderUnsavedChangesDialog() {
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(214, 68, 92, 255));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(168, 44, 64, 255));
         if (ImGui::Button("Save", ImVec2(bw, 0))) {
-            if (SaveCurrentScene())
-                glfwSetWindowShouldClose(m_window, 1);
+            // Save every dirty document; close only if none was cancelled.
+            std::vector<uint32_t> dirtyIds;
+            for (const auto& d : m_docs) if (d.dirty) dirtyIds.push_back(d.id);
+            bool allSaved = true;
+            for (uint32_t id : dirtyIds)
+                if (!SaveDocument(id)) { allSaved = false; break; }
+            if (allSaved) glfwSetWindowShouldClose(m_window, 1);
             m_showUnsavedChangesDialog = false;
             ImGui::CloseCurrentPopup();
         }
@@ -2591,6 +2763,92 @@ void EditorUI::RenderUnsavedChangesDialog() {
         ImGui::SameLine();
         if (ImGui::Button("Cancel", ImVec2(bw, 0))) {
             m_showUnsavedChangesDialog = false;
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::EndPopup();
+    }
+
+    ImGui::PopStyleVar(4);
+}
+
+void EditorUI::RequestCloseDocument(uint32_t id) {
+    SceneDoc* doc = FindDoc(id);
+    if (!doc) return;
+    if (doc->dirty) {
+        m_closePromptDoc = id;              // confirm before discarding
+    } else {
+        CloseDocument(id);
+        m_tabSelectId = m_activeDoc;
+    }
+}
+
+void EditorUI::RenderCloseSceneDialog() {
+    if (m_closePromptDoc == 0) return;
+    SceneDoc* doc = FindDoc(m_closePromptDoc);
+    if (!doc) { m_closePromptDoc = 0; return; }
+    std::string sceneName = doc->name.empty() ? "Untitled" : doc->name;
+
+    ImGui::OpenPopup("Close Scene");
+
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(500.0f, 230.0f), ImGuiCond_Always);
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,  ImVec2(28, 24));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,  6.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,    ImVec2(8, 12));
+
+    if (ImGui::BeginPopupModal("Close Scene", nullptr,
+            ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoTitleBar)) {
+
+        ImGui::SetWindowFontScale(1.25f);
+        {
+            const char* title = "Close Scene";
+            float tw = ImGui::CalcTextSize(title).x;
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
+                                 (ImGui::GetContentRegionAvail().x - tw) * 0.5f);
+            ImGui::TextColored(ImVec4(0.95f, 0.95f, 0.97f, 1.0f), "%s", title);
+        }
+        ImGui::SetWindowFontScale(1.0f);
+
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.72f, 0.72f, 0.76f, 1.0f),
+            "\"%s\" has unsaved changes.", sceneName.c_str());
+        ImGui::TextColored(ImVec4(0.72f, 0.72f, 0.76f, 1.0f),
+            "Do you want to save before closing?");
+
+        const float bw      = 112.0f;
+        const float spacing = ImGui::GetStyle().ItemSpacing.x;
+        float rowLeft = ImGui::GetCursorPosX();
+        float fullW   = ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosY(ImGui::GetWindowHeight() -
+                             ImGui::GetStyle().WindowPadding.y - ImGui::GetFrameHeight());
+
+        uint32_t id = m_closePromptDoc;
+        ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(192, 54, 76, 255));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(214, 68, 92, 255));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(168, 44, 64, 255));
+        if (ImGui::Button("Save", ImVec2(bw, 0))) {
+            if (SaveDocument(id)) { CloseDocument(id); m_tabSelectId = m_activeDoc; }
+            m_closePromptDoc = 0;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::PopStyleColor(3);
+
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(rowLeft + fullW - (bw * 2.0f + spacing));
+        if (ImGui::Button("Don't Save", ImVec2(bw, 0))) {
+            CloseDocument(id);
+            m_tabSelectId    = m_activeDoc;
+            m_closePromptDoc = 0;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(bw, 0))) {
+            m_closePromptDoc = 0;
             ImGui::CloseCurrentPopup();
         }
 

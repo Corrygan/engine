@@ -38,7 +38,7 @@ int AssetDatabase::ScanFolder(const std::string& folderPath) {
         const std::string ext  = entry.path().extension().string();
 
         // .graph is a sub-asset of its .emat — no standalone GUID needed.
-        if (ext == ".meta" || ext == ".emdl" || ext == ".escn" || ext == ".graph") continue;
+        if (ext == ".meta" || ext == ".emdl" || ext == ".fcscn" || ext == ".escn" || ext == ".graph") continue;
 
         if (IsModelSource(ext)) {
             if (ModelImporter::NeedsReimport(path)) {
