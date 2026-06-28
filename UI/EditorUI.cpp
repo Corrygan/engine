@@ -33,6 +33,7 @@
 #include <filesystem>
 #include <fstream>
 #include <algorithm>
+#include <cstring>
 #include <unordered_set>
 #include <cstdint>
 #include <cmath>
@@ -281,8 +282,25 @@ namespace {
         if (auto* c = s.try_get<ScriptComponent>(se))   d.emplace_or_replace<ScriptComponent>(de, *c);
     }
 
+    // Write a (local) TRS matrix back into a TransformComponent, dropping any
+    // shear/perspective. Used by the gizmo and reparenting.
+    void SetTransformFromMatrix(TransformComponent& tr, const glm::mat4& m) {
+        tr.position = glm::vec3(m[3]);
+        glm::vec3 sc(glm::length(glm::vec3(m[0])),
+                     glm::length(glm::vec3(m[1])),
+                     glm::length(glm::vec3(m[2])));
+        tr.scale = sc;
+        if (sc.x > 1e-5f && sc.y > 1e-5f && sc.z > 1e-5f) {
+            glm::mat3 rot(glm::vec3(m[0]) / sc.x,
+                          glm::vec3(m[1]) / sc.y,
+                          glm::vec3(m[2]) / sc.z);
+            tr.rotation = glm::quat_cast(rot);
+        }
+    }
+
     // Deep-copy every entity (Name + all components) from src into dst, filling
-    // srcToDst with the old->new id remap. Used for undo/redo snapshots.
+    // srcToDst with the old->new id remap. Used for undo/redo snapshots. The
+    // parent hierarchy is re-linked through the remap so parenting survives undo.
     void CloneScene(const Scene& src, Scene& dst,
                     std::unordered_map<entt::entity, entt::entity>& srcToDst) {
         dst.Clear();
@@ -292,6 +310,15 @@ namespace {
             entt::entity n = dst.Create(s.get<NameComponent>(e).name);
             CopyEntity(s, e, dst.Reg(), n);
             srcToDst[e] = n;
+        }
+        // Re-link parents in dst id space (CopyEntity intentionally skips the link).
+        entt::registry& d = dst.Reg();
+        for (auto [se, de] : srcToDst) {
+            if (const auto* pc = s.try_get<ParentComponent>(se)) {
+                auto it = srcToDst.find(pc->parent);
+                if (it != srcToDst.end())
+                    d.emplace<ParentComponent>(de, ParentComponent{ it->second });
+            }
         }
     }
 
@@ -355,6 +382,21 @@ namespace {
         ofn.lpstrFilter  = "Force Project\0*.fcproj\0All Files\0*.*\0";
         ofn.lpstrDefExt  = "fcproj";
         ofn.nFilterIndex = 1;
+        ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
+        return GetSaveFileNameA(&ofn) ? std::string(fileName) : "";
+    }
+
+    std::string SavePrefabFileDialog(const std::string& initialDir, const std::string& defName) {
+        OPENFILENAMEA ofn{};
+        char fileName[MAX_PATH] = "";
+        if (!defName.empty()) strncpy_s(fileName, sizeof(fileName), defName.c_str(), _TRUNCATE);
+        ofn.lStructSize  = sizeof(ofn);
+        ofn.lpstrFile    = fileName;
+        ofn.nMaxFile     = MAX_PATH;
+        ofn.lpstrFilter  = "Force Prefab\0*.fcprefab\0All Files\0*.*\0";
+        ofn.lpstrDefExt  = "fcprefab";
+        ofn.nFilterIndex = 1;
+        if (!initialDir.empty()) ofn.lpstrInitialDir = initialDir.c_str();
         ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
         return GetSaveFileNameA(&ofn) ? std::string(fileName) : "";
     }
@@ -919,7 +961,7 @@ void EditorUI::RenderAssetBrowser() {
         m_assetBrowserDirty = false;
         m_assetBrowserItems.clear();
         static const std::unordered_set<std::string> kAssetExts = {
-            ".emat", ".emdl", ".fcscn", ".escn",
+            ".emat", ".emdl", ".fcscn", ".escn", ".fcprefab",
             ".png", ".jpg", ".jpeg", ".bmp", ".tga", ".hdr",
             ".obj", ".fbx", ".gltf", ".glb"
         };
@@ -1047,6 +1089,8 @@ void EditorUI::RenderAssetBrowser() {
             typeColor = {0.90f, 0.52f, 0.12f, 1.0f}; typeLabel = "SRC";
         } else if (item.ext == ".fcscn" || item.ext == ".escn") {
             typeColor = {0.62f, 0.32f, 0.92f, 1.0f}; typeLabel = "SCN";
+        } else if (item.ext == ".fcprefab") {
+            typeColor = {0.30f, 0.74f, 0.52f, 1.0f}; typeLabel = "PRE";
         } else if (item.ext==".png"||item.ext==".jpg"||item.ext==".jpeg"||item.ext==".bmp") {
             typeColor = {0.90f, 0.80f, 0.12f, 1.0f}; typeLabel = "IMG";
         } else {
@@ -1185,6 +1229,8 @@ void EditorUI::RenderAssetBrowser() {
                 ImportModelAsync(item.path);
             } else if (item.ext == ".fcscn" || item.ext == ".escn") {
                 OpenScene(item.path);
+            } else if (item.ext == ".fcprefab") {
+                InstantiatePrefab(item.path);
             } else if (item.ext == ".hdr") {
                 if (m_sceneRenderer) {
                     m_sceneRenderer->SetEnvironmentHDR(item.path);
@@ -1246,10 +1292,15 @@ void EditorUI::RenderHierarchy() {
                         ActiveDoc().name.c_str(), (size_t)nameView.size());
     ImGui::Separator();
 
-    // Only the active scene's objects are shown. Snapshot ids first so a
-    // Delete/Duplicate during iteration can't invalidate the view.
-    std::vector<entt::entity> ents(nameView.begin(), nameView.end());
-    for (entt::entity e : ents)
+    // Render the forest: only root entities at the top level; RenderEntityNode
+    // recurses into children. Snapshot root ids first so a Delete/Duplicate/
+    // reparent during iteration can't invalidate the view.
+    std::vector<entt::entity> roots;
+    for (entt::entity e : nameView) {
+        const auto* pc = reg.try_get<ParentComponent>(e);
+        if (!pc || pc->parent == entt::null || !reg.valid(pc->parent)) roots.push_back(e);
+    }
+    for (entt::entity e : roots)
         if (m_scene.Valid(e)) RenderEntityNode(e);
 
     ImGui::Separator();
@@ -1265,8 +1316,7 @@ void EditorUI::RenderHierarchy() {
     if (ImGui::Button("Delete Selected")) {
         if (m_scene.Valid(m_selected)) {
             std::string name = reg.get<NameComponent>(m_selected).name;
-            m_scene.Destroy(m_selected);
-            m_selected = entt::null;
+            DestroyEntitySubtree(m_selected);   // clears m_selected
             MarkDirty();
             LogInfo("Deleted: " + name);
         }
@@ -1281,12 +1331,51 @@ void EditorUI::RenderEntityNode(entt::entity e) {
     const MaterialComponent* matc = reg.try_get<MaterialComponent>(e);
     std::string matPath = matc ? matc->path : std::string();
 
+    // Children = entities whose parent is e. Snapshot now so a reparent/delete
+    // triggered by this node's drop/menu can't invalidate the recursion below.
+    std::vector<entt::entity> children;
+    for (entt::entity c : reg.view<ParentComponent>())
+        if (reg.get<ParentComponent>(c).parent == e) children.push_back(c);
+
     ImGui::PushID(static_cast<int>(entt::to_integral(e)));
 
-    bool isSelected = (m_selected == e);
-    if (ImGui::Selectable(name.c_str(), isSelected)) {
+    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow |
+                               ImGuiTreeNodeFlags_OpenOnDoubleClick |
+                               ImGuiTreeNodeFlags_SpanAvailWidth |
+                               ImGuiTreeNodeFlags_DefaultOpen;
+    if (m_selected == e)  flags |= ImGuiTreeNodeFlags_Selected;
+    if (children.empty()) flags |= ImGuiTreeNodeFlags_Leaf;
+
+    bool open = ImGui::TreeNodeEx((void*)(intptr_t)entt::to_integral(e),
+                                  flags, "%s", name.c_str());
+
+    // Single-click the label selects; clicking the arrow only toggles open.
+    if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
         SelectEntity(e);
         LogInfo("Selected: " + name);
+    }
+
+    // Drag SOURCE: pick this entity up to drop onto a new parent (or empty space).
+    if (ImGui::BeginDragDropSource()) {
+        ImGui::SetDragDropPayload("ENTITY_NODE", &e, sizeof(entt::entity));
+        ImGui::Text("%s", name.c_str());
+        ImGui::EndDragDropSource();
+    }
+
+    // Drag TARGET: another entity (reparent onto this), or a material (assign).
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("ENTITY_NODE")) {
+            entt::entity dragged = *static_cast<const entt::entity*>(p->Data);
+            ReparentEntity(dragged, e);
+        }
+        if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("ASSET_EMAT")) {
+            std::string assigned(static_cast<const char*>(p->Data));
+            reg.emplace_or_replace<MaterialComponent>(e, MaterialComponent{ assigned });
+            if (m_nodeEditor) m_nodeEditor->EnsureCompiled(assigned, m_sceneRenderer);
+            MarkDirty();
+            LogInfo("Material assigned to " + name);
+        }
+        ImGui::EndDragDropTarget();
     }
 
     if (!matPath.empty() && m_previewRenderer) {
@@ -1308,40 +1397,128 @@ void EditorUI::RenderEntityNode(entt::entity e) {
         }
     }
 
-    if (ImGui::BeginDragDropTarget()) {
-        if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("ASSET_EMAT")) {
-            std::string assigned(static_cast<const char*>(p->Data));
-            reg.emplace_or_replace<MaterialComponent>(e, MaterialComponent{ assigned });
-            if (m_nodeEditor) m_nodeEditor->EnsureCompiled(assigned, m_sceneRenderer);
-            MarkDirty();
-            LogInfo("Material assigned to " + name);
-        }
-        ImGui::EndDragDropTarget();
-    }
-
     if (ImGui::BeginPopupContextItem()) {
         if (ImGui::MenuItem("Duplicate")) {
             DuplicateEntity(e);
             MarkDirty();
             LogInfo("Duplicated: " + name);
         }
+        if (ImGui::MenuItem("Create Prefab...")) CreatePrefab(e);
+        const auto* pc = reg.try_get<ParentComponent>(e);
+        bool hasParent = pc && pc->parent != entt::null && reg.valid(pc->parent);
+        if (ImGui::MenuItem("Unparent", nullptr, false, hasParent))
+            ReparentEntity(e, entt::null);
+        ImGui::Separator();
         if (ImGui::MenuItem("Delete")) {
-            if (m_selected == e) m_selected = entt::null;
-            m_scene.Destroy(e);
+            DestroyEntitySubtree(e);
             MarkDirty();
             LogInfo("Deleted: " + name);
         }
         ImGui::EndPopup();
     }
 
+    if (open) {
+        for (entt::entity c : children)
+            if (m_scene.Valid(c)) RenderEntityNode(c);
+        ImGui::TreePop();
+    }
+
     ImGui::PopID();
+}
+
+// Reparent `child` under `newParent` (null = make a root), preserving the child's
+// world pose so it doesn't visually jump. Rejects cycles (parenting to self or a
+// descendant).
+void EditorUI::ReparentEntity(entt::entity child, entt::entity newParent) {
+    if (child == entt::null || !m_scene.Valid(child) || child == newParent) return;
+    entt::registry& reg = m_scene.Reg();
+    if (newParent != entt::null) {
+        if (!reg.valid(newParent)) return;
+        if (IsAncestorOf(reg, child, newParent)) return;   // would create a cycle
+    }
+
+    // Keep the world transform constant: newLocal = inverse(parentWorld) * childWorld.
+    glm::mat4 childWorld = WorldMatrixOf(reg, child);
+    glm::mat4 parentWorld(1.0f);
+    if (newParent != entt::null) parentWorld = WorldMatrixOf(reg, newParent);
+    SetTransformFromMatrix(reg.get<TransformComponent>(child),
+                           glm::inverse(parentWorld) * childWorld);
+
+    if (newParent == entt::null) reg.remove<ParentComponent>(child);
+    else reg.emplace_or_replace<ParentComponent>(child, ParentComponent{ newParent });
+    MarkDirty();
+}
+
+// Destroy an entity together with its whole subtree (children, grandchildren, ...).
+void EditorUI::DestroyEntitySubtree(entt::entity e) {
+    if (!m_scene.Valid(e)) return;
+    entt::registry& reg = m_scene.Reg();
+    std::vector<entt::entity> kids;
+    for (entt::entity c : reg.view<ParentComponent>())
+        if (reg.get<ParentComponent>(c).parent == e) kids.push_back(c);
+    for (entt::entity c : kids) DestroyEntitySubtree(c);
+    if (m_selected == e) m_selected = entt::null;
+    m_scene.Destroy(e);
 }
 
 entt::entity EditorUI::DuplicateEntity(entt::entity src) {
     entt::registry& reg = m_scene.Reg();
     entt::entity e = m_scene.Create(reg.get<NameComponent>(src).name + "_copy");
     CopyEntity(reg, src, reg, e);
+    // The copy shares the original's parent (a sibling); CopyEntity skips the link.
+    if (const auto* pc = reg.try_get<ParentComponent>(src);
+        pc && pc->parent != entt::null && reg.valid(pc->parent))
+        reg.emplace<ParentComponent>(e, *pc);
     return e;
+}
+
+// A prefab is just a one-entity scene, so it reuses the scene serializer.
+void EditorUI::CreatePrefab(entt::entity e) {
+    if (!m_scene.Valid(e)) return;
+    std::string defName = m_scene.Reg().get<NameComponent>(e).name;
+    std::string path = SavePrefabFileDialog(m_project.assetDir, defName);
+    if (path.empty()) return;
+
+    Scene temp;
+    entt::entity n = temp.Create(defName);
+    CopyEntity(m_scene.Reg(), e, temp.Reg(), n);
+    if (!SceneSerializer::Save(path, temp)) {
+        LogError("Failed to save prefab: " + path);
+        return;
+    }
+    AssetDatabase::GetOrCreateGuid(path, "Prefab");
+    m_assetBrowserDirty = true;
+    LogSuccess("Prefab created: " + std::filesystem::path(path).filename().string());
+}
+
+void EditorUI::InstantiatePrefab(const std::string& path) {
+    Scene temp;
+    if (!SceneSerializer::Load(path, temp)) {
+        LogError("Failed to load prefab: " + path);
+        return;
+    }
+    entt::registry&       reg  = m_scene.Reg();
+    const entt::registry& treg = temp.Reg();
+    std::unordered_map<entt::entity, entt::entity> map;
+    entt::entity last = entt::null;
+    for (entt::entity e : treg.view<NameComponent>()) {
+        entt::entity n = m_scene.Create(treg.get<NameComponent>(e).name);
+        CopyEntity(treg, e, reg, n);
+        map[e] = n;
+        last = n;
+    }
+    // Re-link any internal parent relationships; prefab roots stay at scene root.
+    for (auto [se, de] : map) {
+        if (const auto* pc = treg.try_get<ParentComponent>(se)) {
+            auto it = map.find(pc->parent);
+            if (it != map.end()) reg.emplace<ParentComponent>(de, ParentComponent{ it->second });
+        }
+    }
+    if (last != entt::null) {
+        m_selected = last;
+        MarkDirty();
+        LogSuccess("Instantiated prefab: " + std::filesystem::path(path).stem().string());
+    }
 }
 
 void EditorUI::EnterPlayMode() {
@@ -1767,7 +1944,9 @@ void EditorUI::RenderViewport() {
         };
 
         for (auto [e, t, L] : m_scene.Reg().view<TransformComponent, LightComponent>().each()) {
-            glm::vec3 pos = t.position;
+            (void)t;
+            glm::mat4 world = WorldMatrixOf(m_scene.Reg(), e);
+            glm::vec3 pos = glm::vec3(world[3]);
             bool sel = (m_selected == e);
 
             ImVec2 sp;
@@ -1775,8 +1954,7 @@ void EditorUI::RenderViewport() {
 
             // Range / cone overlay — only for the selected light, kept subtle.
             if (sel) {
-                glm::mat4 m   = t.Matrix();
-                glm::vec3 dir = glm::normalize(glm::mat3(m) * glm::vec3(0.0f, 0.0f, -1.0f));
+                glm::vec3 dir = glm::normalize(glm::mat3(world) * glm::vec3(0.0f, 0.0f, -1.0f));
                 ImU32 line = IM_COL32((int)(L.color.r * 255), (int)(L.color.g * 255),
                                       (int)(L.color.b * 255), 70);   // low alpha = subtle
 
@@ -1830,35 +2008,27 @@ void EditorUI::RenderViewport() {
 
     if (editing && m_scene.Valid(m_selected) &&
         EntityType(m_scene.Reg(), m_selected) != PrimitiveType::Empty) {
-        TransformComponent& tr = m_scene.Reg().get<TransformComponent>(m_selected);
-        glm::mat4 model = tr.Matrix();
+        entt::registry&     reg = m_scene.Reg();
+        TransformComponent& tr  = reg.get<TransformComponent>(m_selected);
+
+        // The gizmo manipulates the entity's WORLD matrix. Build it from the
+        // parent's (cached) world transform and the entity's own local transform.
+        glm::mat4 parentWorld(1.0f);
+        if (const auto* pc = reg.try_get<ParentComponent>(m_selected);
+            pc && pc->parent != entt::null && reg.valid(pc->parent))
+            parentWorld = WorldMatrixOf(reg, pc->parent);
+
+        glm::mat4 world = parentWorld * tr.Matrix();
         glm::mat4 delta(1.0f);
 
         if (ImGuizmo::Manipulate(
                 glm::value_ptr(view), glm::value_ptr(projection),
                 m_gizmoOp, m_gizmoMode,
-                glm::value_ptr(model),
+                glm::value_ptr(world),
                 glm::value_ptr(delta)))
         {
-            if (m_gizmoOp == ImGuizmo::TRANSLATE) {
-                // delta[3] is the world-space displacement for both WORLD and
-                // LOCAL modes — avoids the multiplication-order bug that would
-                // rotate the delta.
-                tr.position += glm::vec3(delta[3]);
-            } else {
-                // ROTATE / SCALE: extract directly from the result matrix.
-                tr.position = glm::vec3(model[3]);
-                glm::vec3 sc(glm::length(glm::vec3(model[0])),
-                            glm::length(glm::vec3(model[1])),
-                            glm::length(glm::vec3(model[2])));
-                tr.scale = sc;
-                if (sc.x > 1e-5f && sc.y > 1e-5f && sc.z > 1e-5f) {
-                    glm::mat3 rotMat(glm::vec3(model[0]) / sc.x,
-                                     glm::vec3(model[1]) / sc.y,
-                                     glm::vec3(model[2]) / sc.z);
-                    tr.rotation = glm::quat_cast(rotMat);
-                }
-            }
+            // Convert the manipulated world matrix back into the parent's space.
+            SetTransformFromMatrix(tr, glm::inverse(parentWorld) * world);
             MarkDirty();
         }
     }

@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <entt/entt.hpp>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -51,11 +52,26 @@ struct TransformComponent {
     glm::quat rotation{ 1.0f, 0.0f, 0.0f, 0.0f };   // w, x, y, z
     glm::vec3 scale{ 1.0f };
 
+    // LOCAL transform (relative to the parent, if any). World = parent.world * this.
     glm::mat4 Matrix() const {
         return glm::translate(glm::mat4(1.0f), position)
              * glm::mat4_cast(rotation)
              * glm::scale(glm::mat4(1.0f), scale);
     }
+};
+
+// Parent link for the entity hierarchy. Root entities have no ParentComponent;
+// a child stores its parent here and keeps a LOCAL TransformComponent. World
+// transforms are derived up the chain — see WorldTransform / UpdateWorldTransforms.
+struct ParentComponent {
+    entt::entity parent = entt::null;
+};
+
+// Cached world-space matrix, recomputed each frame by UpdateWorldTransforms from
+// the local TransformComponent and parent chain. Renderer / picking / gizmo read
+// this (via WorldMatrixOf) so that moving a parent moves its children.
+struct WorldTransform {
+    glm::mat4 matrix{ 1.0f };
 };
 
 struct MeshComponent {

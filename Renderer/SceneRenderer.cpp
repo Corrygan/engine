@@ -509,16 +509,18 @@ void main() {
 
     std::vector<GpuLight> CollectLights(Scene& scene) {
         std::vector<GpuLight> lights;
-        auto view = scene.Reg().view<TransformComponent, LightComponent>();
+        const entt::registry& reg = scene.Reg();
+        auto view = reg.view<TransformComponent, LightComponent>();
         for (auto e : view) {
             if ((int)lights.size() >= kMaxLights) break;
-            const TransformComponent& t = view.get<TransformComponent>(e);
-            const LightComponent&     l = view.get<LightComponent>(e);
+            const LightComponent& l = view.get<LightComponent>(e);
 
-            glm::vec3 fwd = glm::normalize(glm::mat3(t.Matrix()) * glm::vec3(0.0f, 0.0f, -1.0f));
+            // World transform so parented lights inherit the parent's pose.
+            glm::mat4 world = WorldMatrixOf(reg, e);
+            glm::vec3 fwd = glm::normalize(glm::mat3(world) * glm::vec3(0.0f, 0.0f, -1.0f));
             GpuLight gl;
             gl.type     = l.type;
-            gl.pos      = t.position;
+            gl.pos      = glm::vec3(world[3]);
             gl.dir      = fwd;
             gl.color    = l.color * l.intensity;
             gl.range    = l.range;
@@ -824,7 +826,7 @@ void SceneRenderer::RenderShadowPass(Scene& scene) {
         else                            primMesh  = GetMeshForKind(mc.kind);
         if (!primMesh && !modelMesh) continue;
 
-        m_depthShader->SetMat4("uModel", view.get<TransformComponent>(e).Matrix());
+        m_depthShader->SetMat4("uModel", WorldMatrixOf(scene.Reg(), e));
         if (modelMesh) modelMesh->Draw();
         else           primMesh->Draw();
     }
@@ -875,7 +877,7 @@ void SceneRenderer::RenderPointShadowPass(Scene& scene,
             else                            primMesh  = GetMeshForKind(mc.kind);
             if (!primMesh && !modelMesh) continue;
 
-            m_pointDepthShader->SetMat4("uModel", view.get<TransformComponent>(e).Matrix());
+            m_pointDepthShader->SetMat4("uModel", WorldMatrixOf(scene.Reg(), e));
             if (modelMesh) modelMesh->Draw();
             else           primMesh->Draw();
         }
@@ -1016,7 +1018,7 @@ void SceneRenderer::RenderGBuffer(Scene& scene,
         if (mc.kind == MeshKind::Model) modelMesh = GetOrLoadModel(mc.modelPath);
         else                            primMesh  = GetMeshForKind(mc.kind);
         if (!primMesh && !modelMesh) continue;
-        m_geomShader->SetMat4("uModel", gview.get<TransformComponent>(e).Matrix());
+        m_geomShader->SetMat4("uModel", WorldMatrixOf(scene.Reg(), e));
         if (modelMesh) modelMesh->Draw();
         else           primMesh->Draw();
     }
@@ -1091,6 +1093,9 @@ uint32_t SceneRenderer::Render(Scene& scene, entt::entity selected,
     if (width <= 0 || height <= 0) return 0;
     entt::registry& reg = scene.Reg();
 
+    // Refresh world matrices from the parent hierarchy before any pass reads them.
+    UpdateWorldTransforms(reg);
+
     // Gather scene lights once per frame; applied to every lit shader.
     std::vector<GpuLight> lights = CollectLights(scene);
 
@@ -1112,7 +1117,7 @@ uint32_t SceneRenderer::Render(Scene& scene, entt::entity selected,
         auto mview = reg.view<TransformComponent, MeshComponent>();
         for (auto e : mview) {
             const MeshComponent& mc = mview.get<MeshComponent>(e);
-            glm::mat4 m = mview.get<TransformComponent>(e).Matrix();
+            glm::mat4 m = WorldMatrixOf(reg, e);
             for (int c = 0; c < 8; ++c) {
                 glm::vec4 corner(
                     (c & 1) ? mc.aabbMax.x : mc.aabbMin.x,
@@ -1283,7 +1288,7 @@ uint32_t SceneRenderer::Render(Scene& scene, entt::entity selected,
         }
 
         const bool hasTangents = (modelMesh != nullptr);
-        glm::mat4 model = renderView.get<TransformComponent>(e).Matrix();
+        glm::mat4 model = WorldMatrixOf(reg, e);
         bool isSelected = (e == selected);
 
         // Stencil setup (same for both shader paths)
@@ -1392,7 +1397,7 @@ uint32_t SceneRenderer::Render(Scene& scene, entt::entity selected,
             glStencilMask(0x00);
 
             m_outlineShader->Bind();
-            glm::mat4 model = reg.get<TransformComponent>(selected).Matrix();
+            glm::mat4 model = WorldMatrixOf(reg, selected);
             m_outlineShader->SetMat4("uModel", model);
             m_outlineShader->SetMat4("uView", view);
             m_outlineShader->SetMat4("uProjection", projection);

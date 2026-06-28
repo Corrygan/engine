@@ -111,10 +111,10 @@ entt::entity PickObject(const Scene& scene,
     const entt::registry& reg = scene.Reg();
     auto meshes = reg.view<TransformComponent, MeshComponent>();
     for (entt::entity e : meshes) {
-        const TransformComponent& t = meshes.get<TransformComponent>(e);
-        const MeshComponent&      m = meshes.get<MeshComponent>(e);
+        const MeshComponent& m = meshes.get<MeshComponent>(e);
 
-        glm::mat4 invModel = glm::inverse(t.Matrix());
+        // Pick against the entity's WORLD transform so picking respects parenting.
+        glm::mat4 invModel = glm::inverse(WorldMatrixOf(reg, e));
         glm::vec3 localOrigin = glm::vec3(invModel * glm::vec4(rayOrigin, 1.0f));
         glm::vec3 localDir    = glm::vec3(invModel * glm::vec4(rayDir, 0.0f));
 

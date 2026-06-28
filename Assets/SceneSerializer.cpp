@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <vector>
+#include <unordered_map>
 
 // On-disk format is unchanged (v6) so existing .escn files keep loading. The
 // flat record still uses PrimitiveType as a discriminator; we translate to/from
@@ -10,7 +12,7 @@
 // 2=Script (matching the old ComponentType order).
 namespace {
     constexpr char     kMagic[4] = { 'E', 'S', 'C', 'N' };
-    constexpr uint32_t kVersion  = 6;   // v5: lights, v6: components
+    constexpr uint32_t kVersion  = 7;   // v5: lights, v6: components, v7: parent links
 
     void WriteString(std::ofstream& file, const std::string& str) {
         uint32_t len = static_cast<uint32_t>(str.size());
@@ -42,6 +44,14 @@ bool SceneSerializer::Save(const std::string& path, const Scene& scene) {
 
     uint32_t count = static_cast<uint32_t>(entities.size());
     file.write(reinterpret_cast<const char*>(&count), sizeof(count));
+
+    // Stable index per entity (same order the loader recreates them in) so parent
+    // links can be stored as a position in the file rather than a volatile id.
+    std::unordered_map<entt::entity, uint32_t> indexOf;
+    {
+        uint32_t idx = 0;
+        for (entt::entity e : entities) indexOf[e] = idx++;
+    }
 
     for (entt::entity e : entities) {
         const PrimitiveType       type = EntityType(reg, e);
@@ -106,6 +116,14 @@ bool SceneSerializer::Save(const std::string& path, const Scene& scene) {
         if (rot) writeComp(0, rot->enabled, rot->axis, rot->speed, 0.0f, std::string());
         if (flo) writeComp(1, flo->enabled, flo->axis, flo->speed, flo->amount, std::string());
         if (scr) writeComp(2, scr->enabled, glm::vec3(0, 1, 0), 0.0f, 0.0f, scr->path);
+
+        // v7: parent link — index into this file's entity list, or -1 for a root.
+        int32_t parentIndex = -1;
+        if (const auto* pc = reg.try_get<ParentComponent>(e); pc && pc->parent != entt::null) {
+            auto it = indexOf.find(pc->parent);
+            if (it != indexOf.end()) parentIndex = static_cast<int32_t>(it->second);
+        }
+        file.write(reinterpret_cast<const char*>(&parentIndex), sizeof(parentIndex));
     }
 
     return true;
@@ -121,7 +139,7 @@ bool SceneSerializer::Load(const std::string& path, Scene& scene) {
 
     uint32_t version = 0;
     if (!file.read(reinterpret_cast<char*>(&version), sizeof(version))) return false;
-    if (version < 4 || version > 6) return false;   // v4 pre-light, v5 lights, v6 components
+    if (version < 4 || version > 7) return false;   // v4 pre-light, v5 lights, v6 components, v7 parents
 
     Guid sceneGuid;
     if (!file.read(reinterpret_cast<char*>(sceneGuid.bytes.data()), sceneGuid.bytes.size())) return false;
@@ -131,6 +149,11 @@ bool SceneSerializer::Load(const std::string& path, Scene& scene) {
 
     scene.Clear();
     entt::registry& reg = scene.Reg();
+
+    std::vector<entt::entity> byIndex;     // file index -> created entity
+    std::vector<int32_t>      parentIdx;   // file index -> parent file index (-1 = root)
+    byIndex.reserve(count);
+    parentIdx.reserve(count);
 
     for (uint32_t i = 0; i < count; ++i) {
         std::string name;
@@ -165,6 +188,7 @@ bool SceneSerializer::Load(const std::string& path, Scene& scene) {
 
         // Build the entity from the decoded record.
         entt::entity e = scene.Create(name);
+        byIndex.push_back(e);
         TransformComponent& tr = reg.get<TransformComponent>(e);
         tr.position = glm::vec3(position[0], position[1], position[2]);
         tr.rotation = glm::quat(rotQuat[3], rotQuat[0], rotQuat[1], rotQuat[2]);   // w,x,y,z
@@ -219,6 +243,20 @@ bool SceneSerializer::Load(const std::string& path, Scene& scene) {
                     reg.emplace_or_replace<ScriptComponent>(e, ScriptComponent{ scriptPath, enabled });
             }
         }
+
+        // v7: parent link (resolved to entities in a second pass below).
+        int32_t parentIndex = -1;
+        if (version >= 7) {
+            if (!file.read(reinterpret_cast<char*>(&parentIndex), sizeof(parentIndex))) return false;
+        }
+        parentIdx.push_back(parentIndex);
+    }
+
+    // Second pass: every entity now exists, so link children to their parents.
+    for (uint32_t i = 0; i < byIndex.size(); ++i) {
+        int32_t p = parentIdx[i];
+        if (p >= 0 && static_cast<uint32_t>(p) < byIndex.size())
+            reg.emplace<ParentComponent>(byIndex[i], ParentComponent{ byIndex[static_cast<uint32_t>(p)] });
     }
 
     return true;

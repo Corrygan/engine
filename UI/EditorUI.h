@@ -113,8 +113,12 @@ private:
     void UpdatePlayMode();           // per-frame game update while playing
     void RenderAssetBrowser();
     void RenderEntityNode(entt::entity e);
+    void ReparentEntity(entt::entity child, entt::entity newParent);  // null = make root
+    void DestroyEntitySubtree(entt::entity e);                        // entity + descendants
     entt::entity DuplicateEntity(entt::entity src);
     void ImportModelAsync(const std::string& sourcePath);   // assimp on a worker, place on main
+    void CreatePrefab(entt::entity e);                      // save an entity as a .fcprefab
+    void InstantiatePrefab(const std::string& path);        // stamp a .fcprefab into the scene
 
     static constexpr float kViewportToolbarH  = 38.0f;
     static constexpr float kViewportTimelineH = 96.0f;
