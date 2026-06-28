@@ -119,3 +119,28 @@ struct FloaterComponent {
     float     amount = 0.5f;
     bool      enabled = true;
 };
+
+// ── Physics (Jolt) ──────────────────────────────────────────────────────────
+// Authoring data only. On Play, EnginePhysics builds a live Jolt body from these
+// and writes the simulated transform back into TransformComponent each step; on
+// Stop the scene snapshot restores the originals. An entity needs a Collider to
+// take part; a RigidBody on top makes it dynamic/kinematic (else it's static).
+
+enum class ColliderShape { Box, Sphere, Capsule };
+
+struct ColliderComponent {
+    ColliderShape shape       = ColliderShape::Box;
+    glm::vec3     halfExtents { 0.5f, 0.5f, 0.5f };  // Box: half-size per axis
+    float         radius      = 0.5f;                // Sphere / Capsule
+    float         halfHeight  = 0.5f;                // Capsule: half the cylinder part
+};
+
+enum class BodyType { Static, Dynamic, Kinematic };
+
+struct RigidBodyComponent {
+    BodyType type        = BodyType::Dynamic;
+    float    mass        = 1.0f;                     // kg (Dynamic only)
+    float    friction    = 0.5f;
+    float    restitution = 0.1f;                     // bounciness 0..1
+    bool     startAwake  = true;
+};

@@ -12,7 +12,7 @@
 // 2=Script (matching the old ComponentType order).
 namespace {
     constexpr char     kMagic[4] = { 'E', 'S', 'C', 'N' };
-    constexpr uint32_t kVersion  = 7;   // v5: lights, v6: components, v7: parent links
+    constexpr uint32_t kVersion  = 8;   // v5: lights, v6: components, v7: parents, v8: physics
 
     void WriteString(std::ofstream& file, const std::string& str) {
         uint32_t len = static_cast<uint32_t>(str.size());
@@ -124,6 +124,29 @@ bool SceneSerializer::Save(const std::string& path, const Scene& scene) {
             if (it != indexOf.end()) parentIndex = static_cast<int32_t>(it->second);
         }
         file.write(reinterpret_cast<const char*>(&parentIndex), sizeof(parentIndex));
+
+        // v8: physics — collider + rigid body (a flag byte says which are present).
+        const ColliderComponent*  cc = reg.try_get<ColliderComponent>(e);
+        const RigidBodyComponent* rbc = reg.try_get<RigidBodyComponent>(e);
+        uint8_t physFlags = (uint8_t)((cc ? 1u : 0u) | (rbc ? 2u : 0u));
+        file.write(reinterpret_cast<const char*>(&physFlags), sizeof(physFlags));
+        if (cc) {
+            uint32_t shape = (uint32_t)cc->shape;
+            float he[3] = { cc->halfExtents.x, cc->halfExtents.y, cc->halfExtents.z };
+            file.write(reinterpret_cast<const char*>(&shape), sizeof(shape));
+            file.write(reinterpret_cast<const char*>(he), sizeof(he));
+            file.write(reinterpret_cast<const char*>(&cc->radius),     sizeof(cc->radius));
+            file.write(reinterpret_cast<const char*>(&cc->halfHeight), sizeof(cc->halfHeight));
+        }
+        if (rbc) {
+            uint32_t bt = (uint32_t)rbc->type;
+            uint8_t  awake = rbc->startAwake ? 1u : 0u;
+            file.write(reinterpret_cast<const char*>(&bt),               sizeof(bt));
+            file.write(reinterpret_cast<const char*>(&rbc->mass),        sizeof(rbc->mass));
+            file.write(reinterpret_cast<const char*>(&rbc->friction),    sizeof(rbc->friction));
+            file.write(reinterpret_cast<const char*>(&rbc->restitution), sizeof(rbc->restitution));
+            file.write(reinterpret_cast<const char*>(&awake),            sizeof(awake));
+        }
     }
 
     return true;
@@ -139,7 +162,7 @@ bool SceneSerializer::Load(const std::string& path, Scene& scene) {
 
     uint32_t version = 0;
     if (!file.read(reinterpret_cast<char*>(&version), sizeof(version))) return false;
-    if (version < 4 || version > 7) return false;   // v4 pre-light, v5 lights, v6 components, v7 parents
+    if (version < 4 || version > 8) return false;   // v4 pre-light .. v7 parents, v8 physics
 
     Guid sceneGuid;
     if (!file.read(reinterpret_cast<char*>(sceneGuid.bytes.data()), sceneGuid.bytes.size())) return false;
@@ -248,6 +271,41 @@ bool SceneSerializer::Load(const std::string& path, Scene& scene) {
         int32_t parentIndex = -1;
         if (version >= 7) {
             if (!file.read(reinterpret_cast<char*>(&parentIndex), sizeof(parentIndex))) return false;
+        }
+
+        // v8: physics components.
+        if (version >= 8) {
+            uint8_t physFlags = 0;
+            if (!file.read(reinterpret_cast<char*>(&physFlags), sizeof(physFlags))) return false;
+            if (physFlags & 1u) {
+                uint32_t shape = 0; float he[3] = { 0.5f, 0.5f, 0.5f };
+                float radius = 0.5f, halfHeight = 0.5f;
+                if (!file.read(reinterpret_cast<char*>(&shape), sizeof(shape)))           return false;
+                if (!file.read(reinterpret_cast<char*>(he), sizeof(he)))                  return false;
+                if (!file.read(reinterpret_cast<char*>(&radius), sizeof(radius)))         return false;
+                if (!file.read(reinterpret_cast<char*>(&halfHeight), sizeof(halfHeight))) return false;
+                ColliderComponent cc;
+                cc.shape       = (ColliderShape)shape;
+                cc.halfExtents = glm::vec3(he[0], he[1], he[2]);
+                cc.radius      = radius;
+                cc.halfHeight  = halfHeight;
+                reg.emplace<ColliderComponent>(e, cc);
+            }
+            if (physFlags & 2u) {
+                uint32_t bt = 0; float mass = 1.0f, friction = 0.5f, rest = 0.1f; uint8_t awake = 1;
+                if (!file.read(reinterpret_cast<char*>(&bt), sizeof(bt)))             return false;
+                if (!file.read(reinterpret_cast<char*>(&mass), sizeof(mass)))         return false;
+                if (!file.read(reinterpret_cast<char*>(&friction), sizeof(friction))) return false;
+                if (!file.read(reinterpret_cast<char*>(&rest), sizeof(rest)))         return false;
+                if (!file.read(reinterpret_cast<char*>(&awake), sizeof(awake)))       return false;
+                RigidBodyComponent rb;
+                rb.type        = (BodyType)bt;
+                rb.mass        = mass;
+                rb.friction    = friction;
+                rb.restitution = rest;
+                rb.startAwake  = awake != 0;
+                reg.emplace<RigidBodyComponent>(e, rb);
+            }
         }
         parentIdx.push_back(parentIndex);
     }

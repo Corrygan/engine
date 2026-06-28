@@ -14,6 +14,7 @@ find_package(assimp CONFIG REQUIRED)
 find_package(Lua REQUIRED)
 find_package(sol2 CONFIG REQUIRED)
 find_package(EnTT CONFIG REQUIRED)
+find_package(Jolt CONFIG REQUIRED)
 
 set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/imgui)
 
@@ -115,6 +116,13 @@ target_link_libraries(EngineJobs PUBLIC engine_common)
 find_package(Threads REQUIRED)
 target_link_libraries(EngineJobs PUBLIC Threads::Threads)
 
+# Physics: Jolt-backed rigid body simulation. Jolt is hidden behind a pimpl in
+# PhysicsWorld.cpp and linked PRIVATE so its headers/defines don't leak upward.
+add_library(EnginePhysics STATIC
+    Physics/PhysicsWorld.cpp
+)
+target_link_libraries(EnginePhysics PUBLIC EngineScene PRIVATE Jolt::Jolt)
+
 # ── Editor application ───────────────────────────────────────────────────────
 add_executable(Engine
     main.cpp
@@ -129,6 +137,7 @@ target_link_libraries(Engine PRIVATE
     EngineAssets
     EngineScripting
     EngineJobs
+    EnginePhysics
     imgui
     imnodes
     glad

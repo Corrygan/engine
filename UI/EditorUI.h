@@ -23,6 +23,7 @@ struct AssetItem {
 
 class SceneRenderer;
 class LuaScripting;
+class PhysicsWorld;
 
 struct ConsoleMessage {
     enum Type { Info, Warning, Error, Success };
@@ -216,6 +217,7 @@ private:
     MaterialPreviewRenderer* m_previewRenderer = nullptr;
     MaterialNodeEditor*      m_nodeEditor      = nullptr;
     LuaScripting*            m_lua             = nullptr;
+    PhysicsWorld*            m_physics         = nullptr;
 
 public:
     bool m_pendingMinimize = false;

@@ -20,6 +20,7 @@
 #include "../Renderer/TextureManager.h"
 #include "../Renderer/Picking.h"
 #include "../Jobs/JobSystem.h"
+#include "../Physics/PhysicsWorld.h"
 #include "../Core/Branding.h"
 #include "../Assets/ProjectFile.h"
 #include "EditorStyle.h"
@@ -280,6 +281,8 @@ namespace {
         if (auto* c = s.try_get<RotatorComponent>(se))  d.emplace_or_replace<RotatorComponent>(de, *c);
         if (auto* c = s.try_get<FloaterComponent>(se))  d.emplace_or_replace<FloaterComponent>(de, *c);
         if (auto* c = s.try_get<ScriptComponent>(se))   d.emplace_or_replace<ScriptComponent>(de, *c);
+        if (auto* c = s.try_get<ColliderComponent>(se))  d.emplace_or_replace<ColliderComponent>(de, *c);
+        if (auto* c = s.try_get<RigidBodyComponent>(se)) d.emplace_or_replace<RigidBodyComponent>(de, *c);
     }
 
     // Write a (local) TRS matrix back into a TransformComponent, dropping any
@@ -421,6 +424,7 @@ bool EditorUI::Initialize(GLFWwindow* window) {
     m_nodeEditor      = new MaterialNodeEditor();
     m_lua             = new LuaScripting();
     m_lua->SetLogCallback([this](const std::string& msg) { LogInfo(msg); });
+    m_physics         = new PhysicsWorld();
 
     jobs::JobSystem::Get().Initialize();
     LogInfo("Job system: " + std::to_string(jobs::JobSystem::Get().WorkerCount())
@@ -466,6 +470,7 @@ bool EditorUI::Initialize(GLFWwindow* window) {
 
 void EditorUI::Shutdown() {
     jobs::JobSystem::Get().Shutdown();   // join workers before tearing subsystems down
+    delete m_physics;         m_physics         = nullptr;
     delete m_lua;             m_lua             = nullptr;
     delete m_nodeEditor;      m_nodeEditor      = nullptr;
     delete m_previewRenderer; m_previewRenderer = nullptr;
@@ -1537,6 +1542,7 @@ void EditorUI::EnterPlayMode() {
 
     m_playTime  = 0.0f;
     m_playState = PlayState::Playing;
+    if (m_physics) m_physics->Begin(m_scene);   // build rigid bodies from components
     if (m_lua) m_lua->StartAll(m_scene);   // run script OnStart
     LogSuccess("Play mode: started");
 }
@@ -1544,6 +1550,7 @@ void EditorUI::EnterPlayMode() {
 void EditorUI::ExitPlayMode() {
     if (m_playState == PlayState::Editing) return;
     if (m_lua) m_lua->StopAll();              // run script OnDestroy, clear state
+    if (m_physics) m_physics->End();          // destroy rigid bodies
 
     // Entities are never created/destroyed during play, so ids stay valid and
     // selection is preserved. Only transforms change, so that's all we restore.
@@ -1603,6 +1610,7 @@ void EditorUI::UpdatePlayMode() {
     }
 
     if (m_lua) m_lua->UpdateAll(m_scene, dt);   // script OnUpdate(dt)
+    if (m_physics) m_physics->Step(m_scene, dt); // advance bodies, write transforms back
 }
 
 void EditorUI::RenderViewportToolbar() {
@@ -1991,6 +1999,45 @@ void EditorUI::RenderViewport() {
             if (sel) dl->AddCircle(sp, ts.x * 0.9f, IM_COL32(255, 200, 80, 220), 0, 2.0f);
             dl->AddText(ImVec2(tp.x + 1, tp.y + 1), IM_COL32(0, 0, 0, 160), icon);  // shadow
             dl->AddText(tp, tint, icon);
+        }
+
+        // ── Collider wireframes (green, editor-only) ─────────────────────
+        const ImU32 colWire = IM_COL32(96, 216, 120, 205);
+        for (auto [e, col] : m_scene.Reg().view<ColliderComponent>().each()) {
+            glm::mat4 world = WorldMatrixOf(m_scene.Reg(), e);
+            glm::vec3 cpos = glm::vec3(world[3]);
+            glm::vec3 cscl(glm::length(glm::vec3(world[0])),
+                           glm::length(glm::vec3(world[1])),
+                           glm::length(glm::vec3(world[2])));
+
+            if (col.shape == ColliderShape::Box) {
+                glm::vec3 h = col.halfExtents;
+                ImVec2 pt[8]; bool ok[8];
+                for (int i = 0; i < 8; ++i) {
+                    glm::vec3 lp((i & 1) ? h.x : -h.x, (i & 2) ? h.y : -h.y, (i & 4) ? h.z : -h.z);
+                    ok[i] = toScreen(glm::vec3(world * glm::vec4(lp, 1.0f)), pt[i]);
+                }
+                static const int edges[12][2] = {
+                    {0,1},{1,3},{3,2},{2,0}, {4,5},{5,7},{7,6},{6,4}, {0,4},{1,5},{2,6},{3,7} };
+                for (auto& ed : edges)
+                    if (ok[ed[0]] && ok[ed[1]]) dl->AddLine(pt[ed[0]], pt[ed[1]], colWire, 1.4f);
+            } else if (col.shape == ColliderShape::Sphere) {
+                float r = col.radius * std::max({ cscl.x, cscl.y, cscl.z });
+                worldCircle(cpos, glm::vec3(1,0,0), glm::vec3(0,1,0), r, colWire);
+                worldCircle(cpos, glm::vec3(0,1,0), glm::vec3(0,0,1), r, colWire);
+                worldCircle(cpos, glm::vec3(1,0,0), glm::vec3(0,0,1), r, colWire);
+            } else {  // Capsule (axis-aligned approximation: two rings + side lines)
+                float r  = col.radius     * std::max(cscl.x, cscl.z);
+                float hh = col.halfHeight * cscl.y;
+                glm::vec3 top = cpos + glm::vec3(0, hh, 0), bot = cpos - glm::vec3(0, hh, 0);
+                worldCircle(top, glm::vec3(1,0,0), glm::vec3(0,0,1), r, colWire);
+                worldCircle(bot, glm::vec3(1,0,0), glm::vec3(0,0,1), r, colWire);
+                glm::vec3 d4[4] = { {1,0,0},{-1,0,0},{0,0,1},{0,0,-1} };
+                for (auto& d : d4) {
+                    ImVec2 a, b;
+                    if (toScreen(top + d * r, a) && toScreen(bot + d * r, b)) dl->AddLine(a, b, colWire, 1.4f);
+                }
+            }
         }
     }
 
@@ -2482,6 +2529,73 @@ void EditorUI::RenderInspector() {
             if (remove) { reg.remove<ScriptComponent>(selected); MarkDirty(); }
         }
 
+        if (auto* col = reg.try_get<ColliderComponent>(selected)) {
+            ImGui::PushID("collider");
+            ImGui::Text("Collider");
+            ImGui::SameLine(ImGui::GetContentRegionMax().x - 22.0f);
+            bool remove = IconButton(ICON_FA_XMARK, "##rmcol", ImVec2(20.0f, 20.0f));
+            if (!remove) {
+                const char* shapes[] = { "Box", "Sphere", "Capsule" };
+                int sh = (int)col->shape;
+                ImGui::TextDisabled("Shape");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::Combo("##colshape", &sh, shapes, 3)) { col->shape = (ColliderShape)sh; MarkDirty(); }
+                if (col->shape == ColliderShape::Box) {
+                    ImGui::TextDisabled("Half Extents");
+                    ImGui::SetNextItemWidth(-1);
+                    if (ImGui::DragFloat3("##colhe", glm::value_ptr(col->halfExtents), 0.01f, 0.01f, 1000.0f, "%.2f")) MarkDirty();
+                } else if (col->shape == ColliderShape::Sphere) {
+                    ImGui::TextDisabled("Radius");
+                    ImGui::SetNextItemWidth(-1);
+                    if (ImGui::DragFloat("##colr", &col->radius, 0.01f, 0.01f, 1000.0f, "%.2f")) MarkDirty();
+                } else {
+                    ImGui::TextDisabled("Radius");
+                    ImGui::SetNextItemWidth(-1);
+                    if (ImGui::DragFloat("##colcr", &col->radius, 0.01f, 0.01f, 1000.0f, "%.2f")) MarkDirty();
+                    ImGui::TextDisabled("Half Height");
+                    ImGui::SetNextItemWidth(-1);
+                    if (ImGui::DragFloat("##colhh", &col->halfHeight, 0.01f, 0.01f, 1000.0f, "%.2f")) MarkDirty();
+                }
+            }
+            ImGui::Spacing();
+            ImGui::PopID();
+            if (remove) { reg.remove<ColliderComponent>(selected); MarkDirty(); }
+        }
+
+        if (auto* rbp = reg.try_get<RigidBodyComponent>(selected)) {
+            ImGui::PushID("rigidbody");
+            ImGui::Text("Rigid Body");
+            ImGui::SameLine(ImGui::GetContentRegionMax().x - 22.0f);
+            bool remove = IconButton(ICON_FA_XMARK, "##rmrb", ImVec2(20.0f, 20.0f));
+            if (!remove) {
+                const char* types[] = { "Static", "Dynamic", "Kinematic" };
+                int ty = (int)rbp->type;
+                ImGui::TextDisabled("Type");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::Combo("##rbtype", &ty, types, 3)) { rbp->type = (BodyType)ty; MarkDirty(); }
+                if (rbp->type == BodyType::Dynamic) {
+                    ImGui::TextDisabled("Mass (kg)");
+                    ImGui::SetNextItemWidth(-1);
+                    if (ImGui::DragFloat("##rbmass", &rbp->mass, 0.05f, 0.001f, 1000.0f, "%.3f")) MarkDirty();
+                }
+                ImGui::TextDisabled("Friction");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::DragFloat("##rbfric", &rbp->friction, 0.01f, 0.0f, 2.0f, "%.2f")) MarkDirty();
+                ImGui::TextDisabled("Restitution");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::DragFloat("##rbrest", &rbp->restitution, 0.01f, 0.0f, 1.0f, "%.2f")) MarkDirty();
+                if (rbp->type == BodyType::Dynamic) {
+                    bool aw = rbp->startAwake;
+                    if (ImGui::Checkbox("Start Awake", &aw)) { rbp->startAwake = aw; MarkDirty(); }
+                }
+                if (!reg.all_of<ColliderComponent>(selected))
+                    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Needs a Collider to simulate");
+            }
+            ImGui::Spacing();
+            ImGui::PopID();
+            if (remove) { reg.remove<RigidBodyComponent>(selected); MarkDirty(); }
+        }
+
         if (ImGui::Button(ICON_FA_PLUS "  Add Component", ImVec2(-1, 0)))
             ImGui::OpenPopup("##addcomp");
         if (ImGui::BeginPopup("##addcomp")) {
@@ -2493,6 +2607,12 @@ void EditorUI::RenderInspector() {
             }
             if (!reg.all_of<ScriptComponent>(selected) && ImGui::MenuItem("Script")) {
                 reg.emplace<ScriptComponent>(selected); MarkDirty();
+            }
+            if (!reg.all_of<ColliderComponent>(selected) && ImGui::MenuItem("Collider")) {
+                reg.emplace<ColliderComponent>(selected); MarkDirty();
+            }
+            if (!reg.all_of<RigidBodyComponent>(selected) && ImGui::MenuItem("Rigid Body")) {
+                reg.emplace<RigidBodyComponent>(selected); MarkDirty();
             }
             ImGui::EndPopup();
         }
