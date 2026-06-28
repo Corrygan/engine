@@ -283,6 +283,7 @@ namespace {
         if (auto* c = s.try_get<ScriptComponent>(se))   d.emplace_or_replace<ScriptComponent>(de, *c);
         if (auto* c = s.try_get<ColliderComponent>(se))  d.emplace_or_replace<ColliderComponent>(de, *c);
         if (auto* c = s.try_get<RigidBodyComponent>(se)) d.emplace_or_replace<RigidBodyComponent>(de, *c);
+        if (auto* c = s.try_get<CharacterControllerComponent>(se)) d.emplace_or_replace<CharacterControllerComponent>(de, *c);
     }
 
     // Write a (local) TRS matrix back into a TransformComponent, dropping any
@@ -1543,6 +1544,11 @@ void EditorUI::EnterPlayMode() {
     m_playTime  = 0.0f;
     m_playState = PlayState::Playing;
     if (m_physics) m_physics->Begin(m_scene);   // build rigid bodies from components
+    if (m_physics && m_physics->HasCharacter()) {   // capture the mouse for FPS control
+        m_playYaw = 0.0f; m_playPitch = 0.0f;
+        m_mouseCaptured = true;
+        glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+    }
     if (m_lua) m_lua->StartAll(m_scene);   // run script OnStart
     LogSuccess("Play mode: started");
 }
@@ -1551,6 +1557,10 @@ void EditorUI::ExitPlayMode() {
     if (m_playState == PlayState::Editing) return;
     if (m_lua) m_lua->StopAll();              // run script OnDestroy, clear state
     if (m_physics) m_physics->End();          // destroy rigid bodies
+    if (m_mouseCaptured) {                     // release the captured cursor
+        m_mouseCaptured = false;
+        glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+    }
 
     // Entities are never created/destroyed during play, so ids stay valid and
     // selection is preserved. Only transforms change, so that's all we restore.
@@ -1611,6 +1621,36 @@ void EditorUI::UpdatePlayMode() {
 
     if (m_lua) m_lua->UpdateAll(m_scene, dt);   // script OnUpdate(dt)
     if (m_physics) m_physics->Step(m_scene, dt); // advance bodies, write transforms back
+}
+
+// Play-mode character input: mouse-look (while captured) + WASD + jump, fed to
+// the physics character. Called from RenderViewport before the follow camera is
+// built so the look direction is fresh.
+void EditorUI::UpdateCharacterInput(const CharacterControllerComponent& cc) {
+    ImGuiIO& io = ImGui::GetIO();
+
+    if (m_mouseCaptured) {
+        m_playYaw   += io.MouseDelta.x * cc.mouseSensitivity;
+        m_playPitch -= io.MouseDelta.y * cc.mouseSensitivity;
+        m_playPitch  = std::clamp(m_playPitch, -1.55f, 1.55f);   // ~±89°
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+            m_mouseCaptured = false;
+            glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        }
+    }
+
+    // Horizontal basis from yaw (forward = -Z at yaw 0).
+    glm::vec3 fwd(  std::sin(m_playYaw), 0.0f, -std::cos(m_playYaw));
+    glm::vec3 right(std::cos(m_playYaw), 0.0f,  std::sin(m_playYaw));
+    glm::vec3 move(0.0f);
+    if (ImGui::IsKeyDown(ImGuiKey_W)) move += fwd;
+    if (ImGui::IsKeyDown(ImGuiKey_S)) move -= fwd;
+    if (ImGui::IsKeyDown(ImGuiKey_D)) move += right;
+    if (ImGui::IsKeyDown(ImGuiKey_A)) move -= right;
+    if (glm::length(move) > 1e-4f) move = glm::normalize(move);
+
+    bool jump = ImGui::IsKeyPressed(ImGuiKey_Space, false);
+    if (m_physics) m_physics->SetCharacterInput(move, jump);
 }
 
 void EditorUI::RenderViewportToolbar() {
@@ -1844,15 +1884,41 @@ void EditorUI::RenderViewport() {
     glm::mat4 view       = m_camera.GetViewMatrix();
     glm::mat4 projection = m_camera.GetProjectionMatrix(aspect);
 
-    // In play mode, render through the scene's first camera entity (game view).
+    // In play mode the camera follows the character controller if there is one;
+    // otherwise it renders through the scene's first camera entity (game view).
+    bool charCamActive = false;
     if (!editing) {
         entt::registry& reg = m_scene.Reg();
-        for (auto [e, t, cam] : reg.view<TransformComponent, CameraComponent>().each()) {
-            glm::mat4 camWorld = glm::translate(glm::mat4(1.0f), t.position)
-                               * glm::mat4_cast(t.rotation);
-            view       = glm::inverse(camWorld);
-            projection = glm::perspective(glm::radians(cam.fov), aspect, cam.nearZ, cam.farZ);
-            break;
+
+        entt::entity ce = entt::null;
+        const CharacterControllerComponent* cc = nullptr;
+        for (auto [e, c] : reg.view<CharacterControllerComponent>().each()) { ce = e; cc = &c; break; }
+
+        if (ce != entt::null && cc && m_physics && m_physics->HasCharacter()) {
+            charCamActive = true;
+            UpdateCharacterInput(*cc);   // mouse-look + WASD/jump -> physics
+
+            glm::vec3 fwd(std::cos(m_playPitch) * std::sin(m_playYaw),
+                          std::sin(m_playPitch),
+                         -std::cos(m_playPitch) * std::cos(m_playYaw));
+            glm::vec3 center = reg.get<TransformComponent>(ce).position;   // capsule center
+            float     feetY  = center.y - cc->height * 0.5f;
+            glm::vec3 head(center.x, feetY + cc->eyeHeight, center.z);
+
+            glm::vec3 eye, target;
+            if (cc->view == CameraView::FirstPerson) { eye = head; target = head + fwd; }
+            else { target = head; eye = head - fwd * cc->thirdDistance; }
+
+            view       = glm::lookAt(eye, target, glm::vec3(0.0f, 1.0f, 0.0f));
+            projection = glm::perspective(glm::radians(70.0f), aspect, 0.05f, 2000.0f);
+        } else {
+            for (auto [e, t, cam] : reg.view<TransformComponent, CameraComponent>().each()) {
+                glm::mat4 camWorld = glm::translate(glm::mat4(1.0f), t.position)
+                                   * glm::mat4_cast(t.rotation);
+                view       = glm::inverse(camWorld);
+                projection = glm::perspective(glm::radians(cam.fov), aspect, cam.nearZ, cam.farZ);
+                break;
+            }
         }
     }
 
@@ -2088,34 +2154,43 @@ void EditorUI::RenderViewport() {
         ImGui::InvisibleButton("ViewportInteraction", viewportSize,
             ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle);
 
-        if (ImGui::IsItemHovered()) {
-            float wheel = ImGui::GetIO().MouseWheel;
-            if (wheel != 0.0f) m_camera.Zoom(wheel);
-        }
-        if (ImGui::IsItemActivated())
-            m_viewportDragAccum = 0.0f;
+        if (charCamActive) {
+            // Play + character: click in the viewport (re)captures the mouse for
+            // FPS control; Esc releases it.
+            if (!m_mouseCaptured && ImGui::IsItemClicked()) {
+                m_mouseCaptured = true;
+                glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+            }
+        } else {
+            if (ImGui::IsItemHovered()) {
+                float wheel = ImGui::GetIO().MouseWheel;
+                if (wheel != 0.0f) m_camera.Zoom(wheel);
+            }
+            if (ImGui::IsItemActivated())
+                m_viewportDragAccum = 0.0f;
 
-        if (ImGui::IsItemActive()) {
-            ImVec2 delta = ImGui::GetIO().MouseDelta;
-            m_viewportDragAccum += std::sqrt(delta.x * delta.x + delta.y * delta.y);
-            if (ImGui::IsMouseDragging(ImGuiMouseButton_Left))
-                m_camera.OrbitDrag(delta.x, delta.y);
-            else if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
-                m_camera.Pan(delta.x, delta.y);
-        }
+            if (ImGui::IsItemActive()) {
+                ImVec2 delta = ImGui::GetIO().MouseDelta;
+                m_viewportDragAccum += std::sqrt(delta.x * delta.x + delta.y * delta.y);
+                if (ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+                    m_camera.OrbitDrag(delta.x, delta.y);
+                else if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
+                    m_camera.Pan(delta.x, delta.y);
+            }
 
-        if (editing && ImGui::IsItemDeactivated() && m_viewportDragAccum < 4.0f && !ImGuizmo::IsOver()) {
-            ImVec2 itemMin  = ImGui::GetItemRectMin();
-            ImVec2 mousePos = ImGui::GetIO().MousePos;
-            float ndcX = (2.0f * (mousePos.x - itemMin.x)) / viewportSize.x - 1.0f;
-            float ndcY = 1.0f - (2.0f * (mousePos.y - itemMin.y)) / viewportSize.y;
+            if (editing && ImGui::IsItemDeactivated() && m_viewportDragAccum < 4.0f && !ImGuizmo::IsOver()) {
+                ImVec2 itemMin  = ImGui::GetItemRectMin();
+                ImVec2 mousePos = ImGui::GetIO().MousePos;
+                float ndcX = (2.0f * (mousePos.x - itemMin.x)) / viewportSize.x - 1.0f;
+                float ndcY = 1.0f - (2.0f * (mousePos.y - itemMin.y)) / viewportSize.y;
 
-            entt::entity hit = PickObject(m_scene, view, projection, ndcX, ndcY);
-            if (hit != entt::null) {
-                SelectEntity(hit);
-                LogInfo("Selected: " + m_scene.Reg().get<NameComponent>(hit).name);
-            } else {
-                m_selected = entt::null;
+                entt::entity hit = PickObject(m_scene, view, projection, ndcX, ndcY);
+                if (hit != entt::null) {
+                    SelectEntity(hit);
+                    LogInfo("Selected: " + m_scene.Reg().get<NameComponent>(hit).name);
+                } else {
+                    m_selected = entt::null;
+                }
             }
         }
     }
@@ -2596,6 +2671,47 @@ void EditorUI::RenderInspector() {
             if (remove) { reg.remove<RigidBodyComponent>(selected); MarkDirty(); }
         }
 
+        if (auto* chc = reg.try_get<CharacterControllerComponent>(selected)) {
+            ImGui::PushID("charctrl");
+            ImGui::Text("Character Controller");
+            ImGui::SameLine(ImGui::GetContentRegionMax().x - 22.0f);
+            bool remove = IconButton(ICON_FA_XMARK, "##rmchar", ImVec2(20.0f, 20.0f));
+            if (!remove) {
+                const char* views[] = { "First Person", "Third Person" };
+                int vw = (int)chc->view;
+                ImGui::TextDisabled("Camera");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::Combo("##charview", &vw, views, 2)) { chc->view = (CameraView)vw; MarkDirty(); }
+                ImGui::TextDisabled("Height / Radius");
+                ImGui::SetNextItemWidth(-1);
+                float hr[2] = { chc->height, chc->radius };
+                if (ImGui::DragFloat2("##charhr", hr, 0.01f, 0.1f, 10.0f, "%.2f")) {
+                    chc->height = hr[0]; chc->radius = hr[1]; MarkDirty();
+                }
+                ImGui::TextDisabled("Move Speed");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::DragFloat("##charspd", &chc->moveSpeed, 0.1f, 0.0f, 50.0f, "%.1f")) MarkDirty();
+                ImGui::TextDisabled("Jump Speed");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::DragFloat("##charjmp", &chc->jumpSpeed, 0.1f, 0.0f, 50.0f, "%.1f")) MarkDirty();
+                ImGui::TextDisabled("Eye Height");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::DragFloat("##chareye", &chc->eyeHeight, 0.01f, 0.0f, 10.0f, "%.2f")) MarkDirty();
+                if (chc->view == CameraView::ThirdPerson) {
+                    ImGui::TextDisabled("Camera Distance");
+                    ImGui::SetNextItemWidth(-1);
+                    if (ImGui::DragFloat("##chardist", &chc->thirdDistance, 0.05f, 0.5f, 20.0f, "%.2f")) MarkDirty();
+                }
+                ImGui::TextDisabled("Mouse Sensitivity");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::DragFloat("##charsens", &chc->mouseSensitivity, 0.0001f, 0.0005f, 0.02f, "%.4f")) MarkDirty();
+                ImGui::TextDisabled("Play: WASD + mouse, Space = jump, Esc = free cursor");
+            }
+            ImGui::Spacing();
+            ImGui::PopID();
+            if (remove) { reg.remove<CharacterControllerComponent>(selected); MarkDirty(); }
+        }
+
         if (ImGui::Button(ICON_FA_PLUS "  Add Component", ImVec2(-1, 0)))
             ImGui::OpenPopup("##addcomp");
         if (ImGui::BeginPopup("##addcomp")) {
@@ -2613,6 +2729,9 @@ void EditorUI::RenderInspector() {
             }
             if (!reg.all_of<RigidBodyComponent>(selected) && ImGui::MenuItem("Rigid Body")) {
                 reg.emplace<RigidBodyComponent>(selected); MarkDirty();
+            }
+            if (!reg.all_of<CharacterControllerComponent>(selected) && ImGui::MenuItem("Character Controller")) {
+                reg.emplace<CharacterControllerComponent>(selected); MarkDirty();
             }
             ImGui::EndPopup();
         }

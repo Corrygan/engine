@@ -144,3 +144,21 @@ struct RigidBodyComponent {
     float    restitution = 0.1f;                     // bounciness 0..1
     bool     startAwake  = true;
 };
+
+// ── Character controller ────────────────────────────────────────────────────
+// A walkable capsule (the player). On Play the physics builds a Jolt
+// CharacterVirtual from this; the editor drives it with WASD/mouse/jump and
+// follows it with a 1st/3rd-person camera. An entity with this component manages
+// its own collision, so it shouldn't also carry a Collider/RigidBody.
+enum class CameraView { FirstPerson, ThirdPerson };
+
+struct CharacterControllerComponent {
+    float      height           = 1.8f;     // total capsule height (m)
+    float      radius           = 0.3f;
+    float      moveSpeed        = 5.0f;     // m/s
+    float      jumpSpeed        = 5.0f;     // m/s launch velocity
+    float      eyeHeight        = 1.6f;     // camera height above feet (1st person)
+    CameraView view             = CameraView::FirstPerson;
+    float      thirdDistance    = 4.0f;     // 3rd-person camera pull-back
+    float      mouseSensitivity = 0.0025f;  // radians per pixel
+};

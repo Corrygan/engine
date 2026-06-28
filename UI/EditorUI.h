@@ -112,6 +112,7 @@ private:
     void ExitPlayMode();
     void TogglePause();
     void UpdatePlayMode();           // per-frame game update while playing
+    void UpdateCharacterInput(const CharacterControllerComponent& cc);  // play: WASD/mouse/jump
     void RenderAssetBrowser();
     void RenderEntityNode(entt::entity e);
     void ReparentEntity(entt::entity child, entt::entity newParent);  // null = make root
@@ -205,6 +206,10 @@ private:
     Scene                   m_playBackup;          // full snapshot, restored on Stop
     std::unordered_map<entt::entity, entt::entity> m_playMap;   // live entity → backup entity
     float                   m_playTime = 0.0f;
+    // Character-controller play camera: 1st/3rd-person look + mouse capture.
+    float                   m_playYaw       = 0.0f;
+    float                   m_playPitch     = 0.0f;
+    bool                    m_mouseCaptured = false;
 
     // Undo/redo
     std::vector<SceneSnapshot> m_undoStack;

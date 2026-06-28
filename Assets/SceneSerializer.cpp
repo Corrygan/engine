@@ -12,7 +12,7 @@
 // 2=Script (matching the old ComponentType order).
 namespace {
     constexpr char     kMagic[4] = { 'E', 'S', 'C', 'N' };
-    constexpr uint32_t kVersion  = 8;   // v5: lights, v6: components, v7: parents, v8: physics
+    constexpr uint32_t kVersion  = 9;   // v6: components, v7: parents, v8: physics, v9: character
 
     void WriteString(std::ofstream& file, const std::string& str) {
         uint32_t len = static_cast<uint32_t>(str.size());
@@ -147,6 +147,22 @@ bool SceneSerializer::Save(const std::string& path, const Scene& scene) {
             file.write(reinterpret_cast<const char*>(&rbc->restitution), sizeof(rbc->restitution));
             file.write(reinterpret_cast<const char*>(&awake),            sizeof(awake));
         }
+
+        // v9: character controller.
+        const CharacterControllerComponent* chc = reg.try_get<CharacterControllerComponent>(e);
+        uint8_t hasChar = chc ? 1u : 0u;
+        file.write(reinterpret_cast<const char*>(&hasChar), sizeof(hasChar));
+        if (chc) {
+            uint32_t vw = (uint32_t)chc->view;
+            file.write(reinterpret_cast<const char*>(&chc->height),           sizeof(chc->height));
+            file.write(reinterpret_cast<const char*>(&chc->radius),           sizeof(chc->radius));
+            file.write(reinterpret_cast<const char*>(&chc->moveSpeed),        sizeof(chc->moveSpeed));
+            file.write(reinterpret_cast<const char*>(&chc->jumpSpeed),        sizeof(chc->jumpSpeed));
+            file.write(reinterpret_cast<const char*>(&chc->eyeHeight),        sizeof(chc->eyeHeight));
+            file.write(reinterpret_cast<const char*>(&chc->thirdDistance),    sizeof(chc->thirdDistance));
+            file.write(reinterpret_cast<const char*>(&chc->mouseSensitivity), sizeof(chc->mouseSensitivity));
+            file.write(reinterpret_cast<const char*>(&vw),                    sizeof(vw));
+        }
     }
 
     return true;
@@ -162,7 +178,7 @@ bool SceneSerializer::Load(const std::string& path, Scene& scene) {
 
     uint32_t version = 0;
     if (!file.read(reinterpret_cast<char*>(&version), sizeof(version))) return false;
-    if (version < 4 || version > 8) return false;   // v4 pre-light .. v7 parents, v8 physics
+    if (version < 4 || version > 9) return false;   // v4 pre-light .. v8 physics, v9 character
 
     Guid sceneGuid;
     if (!file.read(reinterpret_cast<char*>(sceneGuid.bytes.data()), sceneGuid.bytes.size())) return false;
@@ -305,6 +321,26 @@ bool SceneSerializer::Load(const std::string& path, Scene& scene) {
                 rb.restitution = rest;
                 rb.startAwake  = awake != 0;
                 reg.emplace<RigidBodyComponent>(e, rb);
+            }
+        }
+
+        // v9: character controller.
+        if (version >= 9) {
+            uint8_t hasChar = 0;
+            if (!file.read(reinterpret_cast<char*>(&hasChar), sizeof(hasChar))) return false;
+            if (hasChar) {
+                CharacterControllerComponent chc;
+                uint32_t vw = 0;
+                if (!file.read(reinterpret_cast<char*>(&chc.height),           sizeof(chc.height)))           return false;
+                if (!file.read(reinterpret_cast<char*>(&chc.radius),           sizeof(chc.radius)))           return false;
+                if (!file.read(reinterpret_cast<char*>(&chc.moveSpeed),        sizeof(chc.moveSpeed)))        return false;
+                if (!file.read(reinterpret_cast<char*>(&chc.jumpSpeed),        sizeof(chc.jumpSpeed)))        return false;
+                if (!file.read(reinterpret_cast<char*>(&chc.eyeHeight),        sizeof(chc.eyeHeight)))        return false;
+                if (!file.read(reinterpret_cast<char*>(&chc.thirdDistance),    sizeof(chc.thirdDistance)))    return false;
+                if (!file.read(reinterpret_cast<char*>(&chc.mouseSensitivity), sizeof(chc.mouseSensitivity))) return false;
+                if (!file.read(reinterpret_cast<char*>(&vw),                   sizeof(vw)))                   return false;
+                chc.view = (CameraView)vw;
+                reg.emplace<CharacterControllerComponent>(e, chc);
             }
         }
         parentIdx.push_back(parentIndex);

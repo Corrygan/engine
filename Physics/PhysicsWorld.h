@@ -34,6 +34,12 @@ public:
     // interaction). Returns the nearest body hit, or { hit = false }.
     RaycastHit Raycast(const glm::vec3& origin, const glm::vec3& dir, float maxDistance) const;
 
+    // Character controller (Play mode). The editor feeds a world-space move
+    // direction (+ jump) each frame before Step; Step advances the capsule and
+    // writes its position back into the character entity's transform.
+    void SetCharacterInput(const glm::vec3& worldMoveDir, bool jump);
+    bool HasCharacter() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;
