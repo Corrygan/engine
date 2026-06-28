@@ -5,7 +5,10 @@
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include "../Physics/PhysicsWorld.h"
 #include <tuple>
+#include <vector>
+#include <algorithm>
 
 namespace {
     struct LuaEntity {
@@ -35,6 +38,11 @@ struct LuaScripting::Impl {
     sol::state lua;
     struct Inst { entt::entity e; sol::environment env; };
     std::vector<Inst> instances;
+
+    Scene*                    scene = nullptr;     // active scene during play
+    std::vector<entt::entity> pendingDestroy;      // deferred (applied after update)
+    float                     elapsed = 0.0f;      // seconds since Play started
+    float                     lastDt  = 0.0f;
 };
 
 LuaScripting::LuaScripting() {
@@ -79,8 +87,119 @@ LuaScripting::LuaScripting() {
         },
         "setScale", [](LuaEntity& e, float x, float y, float z) {
             if (auto* t = e.xf()) t->scale = glm::vec3(x, y, z);
-        }
+        },
+        "forward", [](LuaEntity& e) {
+            auto* t = e.xf();
+            glm::vec3 f = t ? glm::normalize(t->rotation * glm::vec3(0, 0, -1)) : glm::vec3(0, 0, -1);
+            return std::make_tuple(f.x, f.y, f.z);
+        },
+        "right", [](LuaEntity& e) {
+            auto* t = e.xf();
+            glm::vec3 r = t ? glm::normalize(t->rotation * glm::vec3(1, 0, 0)) : glm::vec3(1, 0, 0);
+            return std::make_tuple(r.x, r.y, r.z);
+        },
+        "up", [](LuaEntity& e) {
+            auto* t = e.xf();
+            glm::vec3 u = t ? glm::normalize(t->rotation * glm::vec3(0, 1, 0)) : glm::vec3(0, 1, 0);
+            return std::make_tuple(u.x, u.y, u.z);
+        },
+        "isValid", [](LuaEntity& e) { return e.reg && e.reg->valid(e.e); },
+        "destroy", [this](LuaEntity& e) {
+            if (e.reg && e.reg->valid(e.e)) m_impl->pendingDestroy.push_back(e.e);
+        },
+        "applyImpulse", [this](LuaEntity& e, float x, float y, float z) {
+            if (m_physics && e.reg && e.reg->valid(e.e)) m_physics->ApplyImpulse(e.e, glm::vec3(x, y, z));
+        },
+        "setVelocity", [this](LuaEntity& e, float x, float y, float z) {
+            if (m_physics && e.reg && e.reg->valid(e.e)) m_physics->SetVelocity(e.e, glm::vec3(x, y, z));
+        },
+        "getVelocity", [this](LuaEntity& e) {
+            glm::vec3 v(0.0f);
+            if (m_physics && e.reg && e.reg->valid(e.e)) v = m_physics->GetVelocity(e.e);
+            return std::make_tuple(v.x, v.y, v.z);
+        },
+        "isGrounded", [this](LuaEntity&) { return m_physics && m_physics->CharacterGrounded(); }
     );
+
+    // ── scene: find / spawn / destroy entities ───────────────────────────────
+    sol::table sceneT = lua.create_named_table("scene");
+    sceneT.set_function("find", [this](const std::string& name) -> sol::object {
+        if (!m_impl->scene) return sol::lua_nil;
+        entt::registry& reg = m_impl->scene->Reg();
+        for (entt::entity e : reg.view<NameComponent>())
+            if (reg.get<NameComponent>(e).name == name)
+                return sol::make_object(m_impl->lua, LuaEntity{ &reg, e });
+        return sol::lua_nil;
+    });
+    sceneT.set_function("spawn", [this](const std::string& name) -> sol::object {
+        if (!m_impl->scene) return sol::lua_nil;
+        entt::entity e = m_impl->scene->Create(name);
+        return sol::make_object(m_impl->lua, LuaEntity{ &m_impl->scene->Reg(), e });
+    });
+    sceneT.set_function("destroy", [this](LuaEntity& e) {
+        if (e.reg && e.reg->valid(e.e)) m_impl->pendingDestroy.push_back(e.e);
+    });
+    sceneT.set_function("count", [this]() {
+        return m_impl->scene ? (int)m_impl->scene->Reg().view<NameComponent>().size() : 0;
+    });
+
+    // ── time ─────────────────────────────────────────────────────────────────
+    sol::table timeT = lua.create_named_table("time");
+    timeT.set_function("elapsed", [this]() { return m_impl->elapsed; });
+    timeT.set_function("dt",      [this]() { return m_impl->lastDt; });
+
+    // ── physics: dynamics control + raycast ──────────────────────────────────
+    sol::table physT = lua.create_named_table("physics");
+    physT.set_function("applyImpulse", [this](LuaEntity& e, float x, float y, float z) {
+        if (m_physics && e.reg && e.reg->valid(e.e)) m_physics->ApplyImpulse(e.e, glm::vec3(x, y, z));
+    });
+    physT.set_function("applyForce", [this](LuaEntity& e, float x, float y, float z) {
+        if (m_physics && e.reg && e.reg->valid(e.e)) m_physics->ApplyForce(e.e, glm::vec3(x, y, z));
+    });
+    physT.set_function("setVelocity", [this](LuaEntity& e, float x, float y, float z) {
+        if (m_physics && e.reg && e.reg->valid(e.e)) m_physics->SetVelocity(e.e, glm::vec3(x, y, z));
+    });
+    physT.set_function("getVelocity", [this](LuaEntity& e) {
+        glm::vec3 v(0.0f);
+        if (m_physics && e.reg && e.reg->valid(e.e)) v = m_physics->GetVelocity(e.e);
+        return std::make_tuple(v.x, v.y, v.z);
+    });
+    physT.set_function("grounded", [this]() { return m_physics && m_physics->CharacterGrounded(); });
+    physT.set_function("raycast",
+        [this](float ox, float oy, float oz, float dx, float dy, float dz, float maxDist) -> sol::table {
+            sol::table t = m_impl->lua.create_table();
+            RaycastHit h;
+            if (m_physics) {
+                glm::vec3 d(dx, dy, dz);
+                if (glm::length(d) > 1e-6f) d = glm::normalize(d);
+                h = m_physics->Raycast(glm::vec3(ox, oy, oz), d, maxDist);
+            }
+            t["hit"]      = h.hit;
+            t["x"]        = h.point.x;
+            t["y"]        = h.point.y;
+            t["z"]        = h.point.z;
+            t["distance"] = h.distance;
+            if (h.hit && h.entity != entt::null && m_impl->scene)
+                t["entity"] = sol::make_object(m_impl->lua, LuaEntity{ &m_impl->scene->Reg(), h.entity });
+            return t;
+        });
+
+    // ── input (provided by the editor) ────────────────────────────────────────
+    sol::table inputT = lua.create_named_table("input");
+    inputT.set_function("keyDown", [this](const std::string& k) {
+        return m_input.keyDown ? m_input.keyDown(k) : false;
+    });
+    inputT.set_function("mouseButton", [this](int b) {
+        return m_input.mouseButton ? m_input.mouseButton(b) : false;
+    });
+    inputT.set_function("mouseDelta", [this]() {
+        float x = 0.0f, y = 0.0f; if (m_input.mouseDelta) m_input.mouseDelta(x, y);
+        return std::make_tuple(x, y);
+    });
+    inputT.set_function("mousePos", [this]() {
+        float x = 0.0f, y = 0.0f; if (m_input.mousePos) m_input.mousePos(x, y);
+        return std::make_tuple(x, y);
+    });
 }
 
 LuaScripting::~LuaScripting() {
@@ -95,6 +214,9 @@ void LuaScripting::StartAll(Scene& scene) {
     StopAll();
     sol::state& lua = m_impl->lua;
     entt::registry& reg = scene.Reg();
+    m_impl->scene   = &scene;
+    m_impl->elapsed = 0.0f;
+    m_impl->pendingDestroy.clear();
 
     auto scripts = reg.view<ScriptComponent>();
     for (entt::entity e : scripts) {
@@ -121,13 +243,29 @@ void LuaScripting::StartAll(Scene& scene) {
 }
 
 void LuaScripting::UpdateAll(Scene& scene, float dt) {
-    (void)scene;
+    m_impl->scene    = &scene;
+    m_impl->lastDt   = dt;
+    m_impl->elapsed += dt;
+    entt::registry& reg = scene.Reg();
+
     for (auto& inst : m_impl->instances) {
+        if (!reg.valid(inst.e)) continue;          // entity was destroyed: skip
         sol::protected_function upd = inst.env["OnUpdate"];
         if (!upd.valid()) continue;
         auto r = upd(dt);
         if (!r.valid()) { sol::error e = r; Log(std::string("[Lua] OnUpdate: ") + e.what()); }
     }
+
+    // Apply deferred destroys, then drop instances whose entity is gone.
+    if (!m_impl->pendingDestroy.empty()) {
+        for (entt::entity e : m_impl->pendingDestroy)
+            if (reg.valid(e)) scene.Destroy(e);
+        m_impl->pendingDestroy.clear();
+    }
+    m_impl->instances.erase(
+        std::remove_if(m_impl->instances.begin(), m_impl->instances.end(),
+            [&](const Impl::Inst& i) { return !reg.valid(i.e); }),
+        m_impl->instances.end());
 }
 
 void LuaScripting::StopAll() {

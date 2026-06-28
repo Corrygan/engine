@@ -104,7 +104,7 @@ target_link_libraries(EngineAssets PUBLIC EngineScene PRIVATE assimp::assimp)
 add_library(EngineScripting STATIC
     Scripting/LuaScripting.cpp
 )
-target_link_libraries(EngineScripting PUBLIC EngineScene PRIVATE ${LUA_LIBRARIES} sol2::sol2)
+target_link_libraries(EngineScripting PUBLIC EngineScene EnginePhysics PRIVATE ${LUA_LIBRARIES} sol2::sol2)
 target_include_directories(EngineScripting PRIVATE ${LUA_INCLUDE_DIR})
 
 # Jobs: CPU worker-thread pool + cooperative wait + main-thread marshaling.

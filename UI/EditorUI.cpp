@@ -413,6 +413,30 @@ EditorUI::~EditorUI() {
     Shutdown();
 }
 
+namespace {
+    // Map a script key name ("w", "space", "left", ...) to an ImGuiKey.
+    ImGuiKey MapImGuiKey(std::string k) {
+        for (char& c : k) if (c >= 'A' && c <= 'Z') c += 32;   // lowercase
+        if (k.size() == 1) {
+            char c = k[0];
+            if (c >= 'a' && c <= 'z') return (ImGuiKey)(ImGuiKey_A + (c - 'a'));
+            if (c >= '0' && c <= '9') return (ImGuiKey)(ImGuiKey_0 + (c - '0'));
+        }
+        if (k == "space")                  return ImGuiKey_Space;
+        if (k == "enter" || k == "return") return ImGuiKey_Enter;
+        if (k == "escape" || k == "esc")   return ImGuiKey_Escape;
+        if (k == "tab")                    return ImGuiKey_Tab;
+        if (k == "shift")                  return ImGuiKey_LeftShift;
+        if (k == "ctrl" || k == "control") return ImGuiKey_LeftCtrl;
+        if (k == "alt")                    return ImGuiKey_LeftAlt;
+        if (k == "up")                     return ImGuiKey_UpArrow;
+        if (k == "down")                   return ImGuiKey_DownArrow;
+        if (k == "left")                   return ImGuiKey_LeftArrow;
+        if (k == "right")                  return ImGuiKey_RightArrow;
+        return ImGuiKey_None;
+    }
+}
+
 bool EditorUI::Initialize(GLFWwindow* window) {
     m_window = window;
     if (!m_window) {
@@ -426,6 +450,13 @@ bool EditorUI::Initialize(GLFWwindow* window) {
     m_lua             = new LuaScripting();
     m_lua->SetLogCallback([this](const std::string& msg) { LogInfo(msg); });
     m_physics         = new PhysicsWorld();
+    m_lua->SetPhysics(m_physics);
+    m_lua->SetInputProvider({
+        [](const std::string& k) { ImGuiKey key = MapImGuiKey(k); return key != ImGuiKey_None && ImGui::IsKeyDown(key); },
+        [](int b)               { return b >= 0 && b < 5 && ImGui::IsMouseDown(b); },
+        [](float& x, float& y)  { x = ImGui::GetIO().MouseDelta.x; y = ImGui::GetIO().MouseDelta.y; },
+        [](float& x, float& y)  { x = ImGui::GetIO().MousePos.x;   y = ImGui::GetIO().MousePos.y; }
+    });
 
     jobs::JobSystem::Get().Initialize();
     LogInfo("Job system: " + std::to_string(jobs::JobSystem::Get().WorkerCount())

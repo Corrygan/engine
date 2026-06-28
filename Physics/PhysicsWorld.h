@@ -39,6 +39,14 @@ public:
     // writes its position back into the character entity's transform.
     void SetCharacterInput(const glm::vec3& worldMoveDir, bool jump);
     bool HasCharacter() const;
+    bool CharacterGrounded() const;
+
+    // Per-entity dynamics control for scripting (no-op unless the entity has a
+    // live dynamic body).
+    void      ApplyImpulse(entt::entity e, const glm::vec3& impulse);
+    void      ApplyForce(entt::entity e, const glm::vec3& force);
+    void      SetVelocity(entt::entity e, const glm::vec3& velocity);
+    glm::vec3 GetVelocity(entt::entity e) const;
 
 private:
     struct Impl;

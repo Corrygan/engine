@@ -338,3 +338,39 @@ void PhysicsWorld::SetCharacterInput(const glm::vec3& worldMoveDir, bool jump) {
 }
 
 bool PhysicsWorld::HasCharacter() const { return m_impl->character != nullptr; }
+
+bool PhysicsWorld::CharacterGrounded() const {
+    return m_impl->character &&
+           m_impl->character->GetGroundState() == JPH::CharacterBase::EGroundState::OnGround;
+}
+
+void PhysicsWorld::ApplyImpulse(entt::entity e, const glm::vec3& v) {
+    auto it = m_impl->bodies.find(e);
+    if (it == m_impl->bodies.end()) return;
+    JPH::BodyInterface& bi = m_impl->system.GetBodyInterface();
+    if (bi.GetMotionType(it->second) != JPH::EMotionType::Dynamic) return;
+    bi.AddImpulse(it->second, JPH::Vec3(v.x, v.y, v.z));
+}
+
+void PhysicsWorld::ApplyForce(entt::entity e, const glm::vec3& v) {
+    auto it = m_impl->bodies.find(e);
+    if (it == m_impl->bodies.end()) return;
+    JPH::BodyInterface& bi = m_impl->system.GetBodyInterface();
+    if (bi.GetMotionType(it->second) != JPH::EMotionType::Dynamic) return;
+    bi.AddForce(it->second, JPH::Vec3(v.x, v.y, v.z));
+}
+
+void PhysicsWorld::SetVelocity(entt::entity e, const glm::vec3& v) {
+    auto it = m_impl->bodies.find(e);
+    if (it == m_impl->bodies.end()) return;
+    JPH::BodyInterface& bi = m_impl->system.GetBodyInterface();
+    if (bi.GetMotionType(it->second) == JPH::EMotionType::Static) return;
+    bi.SetLinearVelocity(it->second, JPH::Vec3(v.x, v.y, v.z));
+}
+
+glm::vec3 PhysicsWorld::GetVelocity(entt::entity e) const {
+    auto it = m_impl->bodies.find(e);
+    if (it == m_impl->bodies.end()) return glm::vec3(0.0f);
+    JPH::Vec3 v = m_impl->system.GetBodyInterface().GetLinearVelocity(it->second);
+    return glm::vec3(v.GetX(), v.GetY(), v.GetZ());
+}
