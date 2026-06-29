@@ -6,6 +6,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include "../Physics/PhysicsWorld.h"
+#include "../Audio/AudioEngine.h"
 #include <tuple>
 #include <vector>
 #include <algorithm>
@@ -199,6 +200,22 @@ LuaScripting::LuaScripting() {
     inputT.set_function("mousePos", [this]() {
         float x = 0.0f, y = 0.0f; if (m_input.mousePos) m_input.mousePos(x, y);
         return std::make_tuple(x, y);
+    });
+
+    // ── audio ─────────────────────────────────────────────────────────────────
+    sol::table audioT = lua.create_named_table("audio");
+    audioT.set_function("play", [this](const std::string& clip) {
+        if (m_audio) m_audio->Play(clip, 1.0f);
+    });
+    audioT.set_function("playAt", [this](const std::string& clip, float x, float y, float z) {
+        if (m_audio) m_audio->PlayAt(clip, glm::vec3(x, y, z), 1.0f);
+    });
+    audioT.set_function("playSource", [this](LuaEntity& e) {
+        if (m_audio && m_impl->scene && e.reg && e.reg->valid(e.e))
+            m_audio->PlaySource(*m_impl->scene, e.e);
+    });
+    audioT.set_function("busVolume", [this](int bus, float v) {
+        if (m_audio && bus >= 0 && bus < 3) m_audio->SetBusVolume((AudioBus)bus, v);
     });
 }
 

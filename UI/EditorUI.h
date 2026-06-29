@@ -24,6 +24,7 @@ struct AssetItem {
 class SceneRenderer;
 class LuaScripting;
 class PhysicsWorld;
+class AudioEngine;
 
 struct ConsoleMessage {
     enum Type { Info, Warning, Error, Success };
@@ -121,6 +122,7 @@ private:
     void ImportModelAsync(const std::string& sourcePath);   // assimp on a worker, place on main
     void CreatePrefab(entt::entity e);                      // save an entity as a .fcprefab
     void InstantiatePrefab(const std::string& path);        // stamp a .fcprefab into the scene
+    void ImportAudio(int category);                         // 0 sound / 1 music / 2 voice
 
     static constexpr float kViewportToolbarH  = 38.0f;
     static constexpr float kViewportTimelineH = 96.0f;
@@ -223,6 +225,7 @@ private:
     MaterialNodeEditor*      m_nodeEditor      = nullptr;
     LuaScripting*            m_lua             = nullptr;
     PhysicsWorld*            m_physics         = nullptr;
+    AudioEngine*             m_audio           = nullptr;
 
 public:
     bool m_pendingMinimize = false;

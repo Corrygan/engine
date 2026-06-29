@@ -12,7 +12,7 @@
 // 2=Script (matching the old ComponentType order).
 namespace {
     constexpr char     kMagic[4] = { 'E', 'S', 'C', 'N' };
-    constexpr uint32_t kVersion  = 9;   // v6: components, v7: parents, v8: physics, v9: character
+    constexpr uint32_t kVersion  = 10;  // v7 parents, v8 physics, v9 character, v10 audio
 
     void WriteString(std::ofstream& file, const std::string& str) {
         uint32_t len = static_cast<uint32_t>(str.size());
@@ -163,6 +163,21 @@ bool SceneSerializer::Save(const std::string& path, const Scene& scene) {
             file.write(reinterpret_cast<const char*>(&chc->mouseSensitivity), sizeof(chc->mouseSensitivity));
             file.write(reinterpret_cast<const char*>(&vw),                    sizeof(vw));
         }
+
+        // v10: audio source + listener (flag byte says which are present).
+        const AudioSourceComponent*   asrc = reg.try_get<AudioSourceComponent>(e);
+        const AudioListenerComponent* alis = reg.try_get<AudioListenerComponent>(e);
+        uint8_t audioFlags = (uint8_t)((asrc ? 1u : 0u) | (alis ? 2u : 0u));
+        file.write(reinterpret_cast<const char*>(&audioFlags), sizeof(audioFlags));
+        if (asrc) {
+            WriteString(file, asrc->clip);
+            file.write(reinterpret_cast<const char*>(&asrc->volume),      sizeof(asrc->volume));
+            file.write(reinterpret_cast<const char*>(&asrc->pitch),       sizeof(asrc->pitch));
+            file.write(reinterpret_cast<const char*>(&asrc->minDistance), sizeof(asrc->minDistance));
+            file.write(reinterpret_cast<const char*>(&asrc->maxDistance), sizeof(asrc->maxDistance));
+            uint8_t f = (uint8_t)((asrc->loop ? 1u : 0u) | (asrc->spatial ? 2u : 0u) | (asrc->playOnStart ? 4u : 0u));
+            file.write(reinterpret_cast<const char*>(&f), sizeof(f));
+        }
     }
 
     return true;
@@ -178,7 +193,7 @@ bool SceneSerializer::Load(const std::string& path, Scene& scene) {
 
     uint32_t version = 0;
     if (!file.read(reinterpret_cast<char*>(&version), sizeof(version))) return false;
-    if (version < 4 || version > 9) return false;   // v4 pre-light .. v8 physics, v9 character
+    if (version < 4 || version > 10) return false;  // v4 pre-light .. v9 character, v10 audio
 
     Guid sceneGuid;
     if (!file.read(reinterpret_cast<char*>(sceneGuid.bytes.data()), sceneGuid.bytes.size())) return false;
@@ -342,6 +357,26 @@ bool SceneSerializer::Load(const std::string& path, Scene& scene) {
                 chc.view = (CameraView)vw;
                 reg.emplace<CharacterControllerComponent>(e, chc);
             }
+        }
+
+        // v10: audio source + listener.
+        if (version >= 10) {
+            uint8_t audioFlags = 0;
+            if (!file.read(reinterpret_cast<char*>(&audioFlags), sizeof(audioFlags))) return false;
+            if (audioFlags & 1u) {
+                AudioSourceComponent as;
+                if (!ReadString(file, as.clip)) return false;
+                if (!file.read(reinterpret_cast<char*>(&as.volume),      sizeof(as.volume)))      return false;
+                if (!file.read(reinterpret_cast<char*>(&as.pitch),       sizeof(as.pitch)))       return false;
+                if (!file.read(reinterpret_cast<char*>(&as.minDistance), sizeof(as.minDistance))) return false;
+                if (!file.read(reinterpret_cast<char*>(&as.maxDistance), sizeof(as.maxDistance))) return false;
+                uint8_t f = 0;
+                if (!file.read(reinterpret_cast<char*>(&f), sizeof(f))) return false;
+                as.loop = (f & 1u) != 0; as.spatial = (f & 2u) != 0; as.playOnStart = (f & 4u) != 0;
+                reg.emplace<AudioSourceComponent>(e, as);
+            }
+            if (audioFlags & 2u)
+                reg.emplace<AudioListenerComponent>(e, AudioListenerComponent{});
         }
         parentIdx.push_back(parentIndex);
     }

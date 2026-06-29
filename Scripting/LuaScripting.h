@@ -4,6 +4,7 @@
 #include "../Scene/Scene.h"
 
 class PhysicsWorld;
+class AudioEngine;
 
 // Drives Script components: per-entity Lua environment with OnStart/OnUpdate/
 // OnDestroy callbacks and an engine API (self:getPos, log, ...). sol2 is kept
@@ -15,6 +16,7 @@ public:
 
     void SetLogCallback(std::function<void(const std::string&)> cb) { m_log = std::move(cb); }
     void SetPhysics(PhysicsWorld* physics) { m_physics = physics; }   // for the Lua physics API
+    void SetAudio(AudioEngine* audio) { m_audio = audio; }            // for the Lua audio API
 
     // Input is supplied by the editor (mapped to ImGui) so scripting stays free
     // of any ImGui/GLFW dependency.
@@ -37,5 +39,6 @@ private:
     Impl* m_impl = nullptr;
     std::function<void(const std::string&)> m_log;
     PhysicsWorld* m_physics = nullptr;
+    AudioEngine*  m_audio   = nullptr;
     InputProvider m_input;
 };

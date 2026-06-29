@@ -12,6 +12,7 @@
 #include "../Assets/AssetDatabase.h"
 #include "../Scripting/LuaScripting.h"
 #include "../Assets/ModelImporter.h"
+#include "../Assets/AudioImporter.h"
 #include "../Renderer/SceneRenderer.h"
 #include "../Renderer/ModelMesh.h"
 #include "../Renderer/Material.h"
@@ -21,6 +22,7 @@
 #include "../Renderer/Picking.h"
 #include "../Jobs/JobSystem.h"
 #include "../Physics/PhysicsWorld.h"
+#include "../Audio/AudioEngine.h"
 #include "../Core/Branding.h"
 #include "../Assets/ProjectFile.h"
 #include "EditorStyle.h"
@@ -268,6 +270,30 @@ namespace {
         return GetOpenFileNameA(&ofn) ? std::string(fileName) : "";
     }
 
+    std::string OpenAudioFileDialog() {
+        OPENFILENAMEA ofn{};
+        char fileName[MAX_PATH] = "";
+        ofn.lStructSize  = sizeof(ofn);
+        ofn.lpstrFile    = fileName;
+        ofn.nMaxFile     = MAX_PATH;
+        ofn.lpstrFilter  = "Audio\0*.wav;*.ogg;*.mp3;*.flac\0All Files\0*.*\0";
+        ofn.nFilterIndex = 1;
+        ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
+        return GetOpenFileNameA(&ofn) ? std::string(fileName) : "";
+    }
+
+    std::string OpenAudioClipDialog() {
+        OPENFILENAMEA ofn{};
+        char fileName[MAX_PATH] = "";
+        ofn.lStructSize  = sizeof(ofn);
+        ofn.lpstrFile    = fileName;
+        ofn.nMaxFile     = MAX_PATH;
+        ofn.lpstrFilter  = "Audio Clips\0*.fcsnd;*.fcmsc;*.fcprs\0All Files\0*.*\0";
+        ofn.nFilterIndex = 1;
+        ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
+        return GetOpenFileNameA(&ofn) ? std::string(fileName) : "";
+    }
+
     // Copy every component (except Name, set at create time) from one entity to
     // another — possibly across registries. Used for Duplicate and the play-mode
     // snapshot. Both src and dst already have Name + Transform (via Scene::Create).
@@ -284,6 +310,8 @@ namespace {
         if (auto* c = s.try_get<ColliderComponent>(se))  d.emplace_or_replace<ColliderComponent>(de, *c);
         if (auto* c = s.try_get<RigidBodyComponent>(se)) d.emplace_or_replace<RigidBodyComponent>(de, *c);
         if (auto* c = s.try_get<CharacterControllerComponent>(se)) d.emplace_or_replace<CharacterControllerComponent>(de, *c);
+        if (auto* c = s.try_get<AudioSourceComponent>(se))   d.emplace_or_replace<AudioSourceComponent>(de, *c);
+        if (auto* c = s.try_get<AudioListenerComponent>(se)) d.emplace_or_replace<AudioListenerComponent>(de, *c);
     }
 
     // Write a (local) TRS matrix back into a TransformComponent, dropping any
@@ -458,6 +486,10 @@ bool EditorUI::Initialize(GLFWwindow* window) {
         [](float& x, float& y)  { x = ImGui::GetIO().MousePos.x;   y = ImGui::GetIO().MousePos.y; }
     });
 
+    m_audio = new AudioEngine();
+    if (!m_audio->Init()) LogWarning("Audio: device init failed");
+    m_lua->SetAudio(m_audio);
+
     jobs::JobSystem::Get().Initialize();
     LogInfo("Job system: " + std::to_string(jobs::JobSystem::Get().WorkerCount())
             + " worker threads");
@@ -502,6 +534,7 @@ bool EditorUI::Initialize(GLFWwindow* window) {
 
 void EditorUI::Shutdown() {
     jobs::JobSystem::Get().Shutdown();   // join workers before tearing subsystems down
+    delete m_audio;           m_audio           = nullptr;
     delete m_physics;         m_physics         = nullptr;
     delete m_lua;             m_lua             = nullptr;
     delete m_nodeEditor;      m_nodeEditor      = nullptr;
@@ -524,6 +557,8 @@ void EditorUI::Render() {
 
     // Run results marshaled back from worker threads (e.g. finished async imports).
     jobs::JobSystem::Get().RunMainThreadTasks();
+
+    if (m_audio) m_audio->Update();   // free finished one-shot voices
 
     if (glfwWindowShouldClose(m_window) && m_sceneDirty) {
         glfwSetWindowShouldClose(m_window, 0);
@@ -934,11 +969,15 @@ void EditorUI::RenderMenuBar() {
         if (ImGui::MenuItem("Sphere"))  AddGameObject("Sphere",  PrimitiveType::Sphere);
         if (ImGui::MenuItem("Plane"))   AddGameObject("Plane",   PrimitiveType::Plane);
         ImGui::Separator();
-        if (RMenuItem("Import Model...", nullptr, ImDrawFlags_RoundCornersBottom)) {
+        if (ImGui::MenuItem("Import Model...")) {
             std::string src = OpenModelFileDialog();
             if (!src.empty())
                 ImportModelAsync(src);
         }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Import Sound..."))  ImportAudio(0);
+        if (ImGui::MenuItem("Import Music..."))  ImportAudio(1);
+        if (RMenuItem("Import Voice...", nullptr, ImDrawFlags_RoundCornersBottom)) ImportAudio(2);
         PopupCloseCheck();
         ImGui::EndPopup();
     }
@@ -1000,7 +1039,8 @@ void EditorUI::RenderAssetBrowser() {
         static const std::unordered_set<std::string> kAssetExts = {
             ".emat", ".emdl", ".fcscn", ".escn", ".fcprefab",
             ".png", ".jpg", ".jpeg", ".bmp", ".tga", ".hdr",
-            ".obj", ".fbx", ".gltf", ".glb"
+            ".obj", ".fbx", ".gltf", ".glb",
+            ".fcsnd", ".fcmsc", ".fcprs", ".wav", ".ogg", ".mp3", ".flac"
         };
         static const std::unordered_set<std::string> kHiddenDirs = {
             "Fonts", "fonts", "Icons", "icons"
@@ -1130,6 +1170,14 @@ void EditorUI::RenderAssetBrowser() {
             typeColor = {0.30f, 0.74f, 0.52f, 1.0f}; typeLabel = "PRE";
         } else if (item.ext==".png"||item.ext==".jpg"||item.ext==".jpeg"||item.ext==".bmp") {
             typeColor = {0.90f, 0.80f, 0.12f, 1.0f}; typeLabel = "IMG";
+        } else if (item.ext == ".fcsnd") {
+            typeColor = {0.36f, 0.80f, 0.62f, 1.0f}; typeLabel = "SND";
+        } else if (item.ext == ".fcmsc") {
+            typeColor = {0.40f, 0.66f, 0.92f, 1.0f}; typeLabel = "MUS";
+        } else if (item.ext == ".fcprs") {
+            typeColor = {0.88f, 0.56f, 0.40f, 1.0f}; typeLabel = "VOX";
+        } else if (item.ext==".wav"||item.ext==".ogg"||item.ext==".mp3"||item.ext==".flac") {
+            typeColor = {0.55f, 0.70f, 0.55f, 1.0f}; typeLabel = "AUD";
         } else {
             typeColor = {0.48f, 0.48f, 0.52f, 1.0f}; typeLabel = "?";
         }
@@ -1273,6 +1321,9 @@ void EditorUI::RenderAssetBrowser() {
                     m_sceneRenderer->SetEnvironmentHDR(item.path);
                     LogSuccess("Environment set: " + item.name);
                 }
+            } else if (item.ext==".fcsnd"||item.ext==".fcmsc"||item.ext==".fcprs"||
+                       item.ext==".wav"||item.ext==".ogg"||item.ext==".mp3"||item.ext==".flac") {
+                if (m_audio) m_audio->Play(item.path);   // 2D preview
             }
         }
 
@@ -1509,6 +1560,19 @@ entt::entity EditorUI::DuplicateEntity(entt::entity src) {
     return e;
 }
 
+// Import a source audio file into the project as a branded clip (0 sound /
+// 1 music / 2 voice) and refresh the asset browser.
+void EditorUI::ImportAudio(int category) {
+    std::string src = OpenAudioFileDialog();
+    if (src.empty()) return;
+    std::string dest = m_project.assetDir.empty() ? std::string("Assets") : m_project.assetDir;
+    std::string out  = AudioImporter::Import(src, category, dest);
+    if (out.empty()) { LogError("Audio import failed: " + src); return; }
+    AssetDatabase::GetOrCreateGuid(out, "Audio");
+    m_assetBrowserDirty = true;
+    LogSuccess("Imported audio: " + std::filesystem::path(out).filename().string());
+}
+
 // A prefab is just a one-entity scene, so it reuses the scene serializer.
 void EditorUI::CreatePrefab(entt::entity e) {
     if (!m_scene.Valid(e)) return;
@@ -1580,6 +1644,7 @@ void EditorUI::EnterPlayMode() {
         m_mouseCaptured = true;
         glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
     }
+    if (m_audio) m_audio->BeginScene(m_scene);   // start play-on-start sources
     if (m_lua) m_lua->StartAll(m_scene);   // run script OnStart
     LogSuccess("Play mode: started");
 }
@@ -1588,6 +1653,7 @@ void EditorUI::ExitPlayMode() {
     if (m_playState == PlayState::Editing) return;
     if (m_lua) m_lua->StopAll();              // run script OnDestroy, clear state
     if (m_physics) m_physics->End();          // destroy rigid bodies
+    if (m_audio) m_audio->EndScene();         // stop scene audio sources
     if (m_mouseCaptured) {                     // release the captured cursor
         m_mouseCaptured = false;
         glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
@@ -1951,6 +2017,14 @@ void EditorUI::RenderViewport() {
                 break;
             }
         }
+    }
+
+    // Drive the audio listener from the active play camera (overridden by an
+    // AudioListenerComponent entity inside UpdateScene if one exists).
+    if (!editing && m_audio) {
+        glm::mat4 invView = glm::inverse(view);
+        m_audio->UpdateScene(m_scene, glm::vec3(invView[3]),
+                             -glm::vec3(invView[2]), glm::vec3(invView[1]));
     }
 
     ImVec2 imageScreenPos = ImGui::GetCursorScreenPos();
@@ -2743,6 +2817,58 @@ void EditorUI::RenderInspector() {
             if (remove) { reg.remove<CharacterControllerComponent>(selected); MarkDirty(); }
         }
 
+        if (auto* au = reg.try_get<AudioSourceComponent>(selected)) {
+            ImGui::PushID("audiosrc");
+            ImGui::Text("Audio Source");
+            ImGui::SameLine(ImGui::GetContentRegionMax().x - 22.0f);
+            bool remove = IconButton(ICON_FA_XMARK, "##rmaud", ImVec2(20.0f, 20.0f));
+            if (!remove) {
+                ImGui::TextDisabled("Clip");
+                ImGui::TextWrapped("%s", au->clip.empty() ? "(none)" : au->clip.c_str());
+                if (ImGui::Button(ICON_FA_FOLDER_OPEN "  Browse##aud", ImVec2(-1, 0))) {
+                    std::string p = OpenAudioClipDialog();
+                    if (!p.empty()) { au->clip = p; MarkDirty(); }
+                }
+                ImGui::TextDisabled("Volume");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::DragFloat("##audvol", &au->volume, 0.01f, 0.0f, 2.0f, "%.2f")) MarkDirty();
+                ImGui::TextDisabled("Pitch");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::DragFloat("##audpit", &au->pitch, 0.01f, 0.1f, 4.0f, "%.2f")) MarkDirty();
+                bool loop = au->loop;
+                if (ImGui::Checkbox("Loop", &loop)) { au->loop = loop; MarkDirty(); }
+                bool sp = au->spatial;
+                if (ImGui::Checkbox("3D (spatial)", &sp)) { au->spatial = sp; MarkDirty(); }
+                bool pos = au->playOnStart;
+                if (ImGui::Checkbox("Play on start", &pos)) { au->playOnStart = pos; MarkDirty(); }
+                if (au->spatial) {
+                    ImGui::TextDisabled("Min / Max distance");
+                    ImGui::SetNextItemWidth(-1);
+                    float mm[2] = { au->minDistance, au->maxDistance };
+                    if (ImGui::DragFloat2("##auddist", mm, 0.1f, 0.1f, 10000.0f, "%.1f")) {
+                        au->minDistance = mm[0]; au->maxDistance = mm[1]; MarkDirty();
+                    }
+                }
+                if (m_playState != PlayState::Editing &&
+                    ImGui::Button("Play now##aud", ImVec2(-1, 0)) && m_audio)
+                    m_audio->PlaySource(m_scene, selected);
+            }
+            ImGui::Spacing();
+            ImGui::PopID();
+            if (remove) { reg.remove<AudioSourceComponent>(selected); MarkDirty(); }
+        }
+
+        if (reg.all_of<AudioListenerComponent>(selected)) {
+            ImGui::PushID("audiolisten");
+            ImGui::Text("Audio Listener");
+            ImGui::SameLine(ImGui::GetContentRegionMax().x - 22.0f);
+            bool remove = IconButton(ICON_FA_XMARK, "##rmlisten", ImVec2(20.0f, 20.0f));
+            if (!remove) ImGui::TextDisabled("This entity's transform is the \"ears\".");
+            ImGui::Spacing();
+            ImGui::PopID();
+            if (remove) { reg.remove<AudioListenerComponent>(selected); MarkDirty(); }
+        }
+
         if (ImGui::Button(ICON_FA_PLUS "  Add Component", ImVec2(-1, 0)))
             ImGui::OpenPopup("##addcomp");
         if (ImGui::BeginPopup("##addcomp")) {
@@ -2763,6 +2889,12 @@ void EditorUI::RenderInspector() {
             }
             if (!reg.all_of<CharacterControllerComponent>(selected) && ImGui::MenuItem("Character Controller")) {
                 reg.emplace<CharacterControllerComponent>(selected); MarkDirty();
+            }
+            if (!reg.all_of<AudioSourceComponent>(selected) && ImGui::MenuItem("Audio Source")) {
+                reg.emplace<AudioSourceComponent>(selected); MarkDirty();
+            }
+            if (!reg.all_of<AudioListenerComponent>(selected) && ImGui::MenuItem("Audio Listener")) {
+                reg.emplace<AudioListenerComponent>(selected); MarkDirty();
             }
             ImGui::EndPopup();
         }

@@ -15,6 +15,7 @@ find_package(Lua REQUIRED)
 find_package(sol2 CONFIG REQUIRED)
 find_package(EnTT CONFIG REQUIRED)
 find_package(Jolt CONFIG REQUIRED)
+find_path(MINIAUDIO_INCLUDE_DIRS "miniaudio.h")
 
 set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/imgui)
 
@@ -97,6 +98,7 @@ add_library(EngineAssets STATIC
     Assets/SceneSerializer.cpp
     Assets/ModelImporter.cpp
     Assets/ProjectFile.cpp
+    Assets/AudioImporter.cpp
 )
 target_link_libraries(EngineAssets PUBLIC EngineScene PRIVATE assimp::assimp)
 
@@ -104,7 +106,7 @@ target_link_libraries(EngineAssets PUBLIC EngineScene PRIVATE assimp::assimp)
 add_library(EngineScripting STATIC
     Scripting/LuaScripting.cpp
 )
-target_link_libraries(EngineScripting PUBLIC EngineScene EnginePhysics PRIVATE ${LUA_LIBRARIES} sol2::sol2)
+target_link_libraries(EngineScripting PUBLIC EngineScene EnginePhysics EngineAudio PRIVATE ${LUA_LIBRARIES} sol2::sol2)
 target_include_directories(EngineScripting PRIVATE ${LUA_INCLUDE_DIR})
 
 # Jobs: CPU worker-thread pool + cooperative wait + main-thread marshaling.
@@ -123,6 +125,15 @@ add_library(EnginePhysics STATIC
 )
 target_link_libraries(EnginePhysics PUBLIC EngineScene PRIVATE Jolt::Jolt)
 
+# Audio: miniaudio-backed playback. miniaudio is compiled in one TU
+# (miniaudio_impl.cpp) and hidden behind AudioEngine's pimpl.
+add_library(EngineAudio STATIC
+    Audio/miniaudio_impl.cpp
+    Audio/AudioEngine.cpp
+)
+target_link_libraries(EngineAudio PUBLIC EngineScene)
+target_include_directories(EngineAudio PRIVATE ${MINIAUDIO_INCLUDE_DIRS})
+
 # ── Editor application ───────────────────────────────────────────────────────
 add_executable(Engine
     main.cpp
@@ -138,6 +149,7 @@ target_link_libraries(Engine PRIVATE
     EngineScripting
     EngineJobs
     EnginePhysics
+    EngineAudio
     imgui
     imnodes
     glad

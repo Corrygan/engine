@@ -2,6 +2,7 @@
 .claude/
 Engine/
 Assets/Materials
+Assets/Scripts
 out/
 x64/
 Engine.slnx

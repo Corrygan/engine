@@ -162,3 +162,24 @@ struct CharacterControllerComponent {
     float      thirdDistance    = 4.0f;     // 3rd-person camera pull-back
     float      mouseSensitivity = 0.0025f;  // radians per pixel
 };
+
+// ── Audio ───────────────────────────────────────────────────────────────────
+// A sound emitter on an entity. On Play, EngineAudio starts play-on-start
+// sources and (for 3D ones) tracks the entity's world position; the bus comes
+// from the clip's container.
+struct AudioSourceComponent {
+    std::string clip;                  // .fcsnd / .fcmsc / .fcprs (or a raw audio file)
+    float       volume      = 1.0f;
+    float       pitch       = 1.0f;
+    bool        loop        = false;
+    bool        spatial     = true;    // 3D positioned (else 2D)
+    bool        playOnStart = true;
+    float       minDistance = 1.0f;    // full volume within this radius
+    float       maxDistance = 50.0f;   // attenuates out to here
+};
+
+// Marks the entity whose transform is the audio listener (the "ears"). If no
+// entity has one, the play camera is used.
+struct AudioListenerComponent {
+    bool enabled = true;
+};
