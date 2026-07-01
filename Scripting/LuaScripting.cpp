@@ -217,6 +217,24 @@ LuaScripting::LuaScripting() {
     audioT.set_function("busVolume", [this](int bus, float v) {
         if (m_audio && bus >= 0 && bus < 3) m_audio->SetBusVolume((AudioBus)bus, v);
     });
+
+    // ── animation ─────────────────────────────────────────────────────────────
+    sol::table animT = lua.create_named_table("anim");
+    animT.set_function("play", [](LuaEntity& e, int clip) {
+        if (!e.reg || !e.reg->valid(e.e)) return;
+        AnimatorComponent a;
+        a.clip = clip; a.time = 0.0f; a.playing = true;
+        if (auto* cur = e.reg->try_get<AnimatorComponent>(e.e)) { a.speed = cur->speed; a.loop = cur->loop; }
+        e.reg->emplace_or_replace<AnimatorComponent>(e.e, a);
+    });
+    animT.set_function("stop", [](LuaEntity& e) {
+        if (e.reg && e.reg->valid(e.e))
+            if (auto* a = e.reg->try_get<AnimatorComponent>(e.e)) a->playing = false;
+    });
+    animT.set_function("setSpeed", [](LuaEntity& e, float s) {
+        if (e.reg && e.reg->valid(e.e))
+            if (auto* a = e.reg->try_get<AnimatorComponent>(e.e)) a->speed = s;
+    });
 }
 
 LuaScripting::~LuaScripting() {

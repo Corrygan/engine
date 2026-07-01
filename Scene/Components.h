@@ -183,3 +183,37 @@ struct AudioSourceComponent {
 struct AudioListenerComponent {
     bool enabled = true;
 };
+
+// Plays a skeletal animation clip on a skinned Model entity. `clip` indexes the
+// model's animation list; `time` (seconds) advances during Play mode.
+struct AnimatorComponent {
+    int   clip    = 0;
+    float time    = 0.0f;
+    float speed   = 1.0f;
+    bool  loop    = true;
+    bool  playing = true;
+};
+
+// ── Particles ────────────────────────────────────────────────────────────────
+// A CPU-simulated, camera-billboarded particle emitter on an entity. Emits
+// continuously at `rate`; the renderer owns the live particle pool. Good for
+// dust, smoke, storm swirls, sparks, blood.
+enum class ParticleBlend { Alpha, Additive };
+
+struct ParticleEmitterComponent {
+    float         rate         = 20.0f;   // particles per second
+    int           maxParticles = 500;
+    float         lifetime     = 2.0f;    // seconds
+    float         lifetimeVar  = 0.3f;    // +/- fraction of lifetime
+    glm::vec3     direction    { 0.0f, 1.0f, 0.0f };
+    float         speed        = 1.0f;
+    float         spread       = 0.3f;    // 0 = straight beam, 1 = wide cone
+    glm::vec3     gravity      { 0.0f, 0.0f, 0.0f };
+    float         startSize    = 0.2f;
+    float         endSize      = 0.0f;
+    glm::vec4     startColor    { 1.0f, 1.0f, 1.0f, 1.0f };
+    glm::vec4     endColor      { 1.0f, 1.0f, 1.0f, 0.0f };
+    ParticleBlend blend        = ParticleBlend::Alpha;
+    bool          emitting     = true;    // spawn new particles (Lua play/stop)
+    std::string   texture;                // optional; soft round dot if empty
+};

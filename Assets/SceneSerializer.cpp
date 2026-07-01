@@ -12,7 +12,7 @@
 // 2=Script (matching the old ComponentType order).
 namespace {
     constexpr char     kMagic[4] = { 'E', 'S', 'C', 'N' };
-    constexpr uint32_t kVersion  = 10;  // v7 parents, v8 physics, v9 character, v10 audio
+    constexpr uint32_t kVersion  = 11;  // v8 physics, v9 character, v10 audio, v11 animator
 
     void WriteString(std::ofstream& file, const std::string& str) {
         uint32_t len = static_cast<uint32_t>(str.size());
@@ -178,6 +178,18 @@ bool SceneSerializer::Save(const std::string& path, const Scene& scene) {
             uint8_t f = (uint8_t)((asrc->loop ? 1u : 0u) | (asrc->spatial ? 2u : 0u) | (asrc->playOnStart ? 4u : 0u));
             file.write(reinterpret_cast<const char*>(&f), sizeof(f));
         }
+
+        // v11: animator.
+        const AnimatorComponent* anim = reg.try_get<AnimatorComponent>(e);
+        uint8_t hasAnim = anim ? 1u : 0u;
+        file.write(reinterpret_cast<const char*>(&hasAnim), sizeof(hasAnim));
+        if (anim) {
+            int32_t clip  = anim->clip;
+            uint8_t flags = (uint8_t)((anim->loop ? 1u : 0u) | (anim->playing ? 2u : 0u));
+            file.write(reinterpret_cast<const char*>(&clip),        sizeof(clip));
+            file.write(reinterpret_cast<const char*>(&anim->speed), sizeof(anim->speed));
+            file.write(reinterpret_cast<const char*>(&flags),       sizeof(flags));
+        }
     }
 
     return true;
@@ -193,7 +205,7 @@ bool SceneSerializer::Load(const std::string& path, Scene& scene) {
 
     uint32_t version = 0;
     if (!file.read(reinterpret_cast<char*>(&version), sizeof(version))) return false;
-    if (version < 4 || version > 10) return false;  // v4 pre-light .. v9 character, v10 audio
+    if (version < 4 || version > 11) return false;  // v4 pre-light .. v10 audio, v11 animator
 
     Guid sceneGuid;
     if (!file.read(reinterpret_cast<char*>(sceneGuid.bytes.data()), sceneGuid.bytes.size())) return false;
@@ -377,6 +389,21 @@ bool SceneSerializer::Load(const std::string& path, Scene& scene) {
             }
             if (audioFlags & 2u)
                 reg.emplace<AudioListenerComponent>(e, AudioListenerComponent{});
+        }
+
+        // v11: animator.
+        if (version >= 11) {
+            uint8_t hasAnim = 0;
+            if (!file.read(reinterpret_cast<char*>(&hasAnim), sizeof(hasAnim))) return false;
+            if (hasAnim) {
+                AnimatorComponent an;
+                int32_t clip = 0; uint8_t flags = 0;
+                if (!file.read(reinterpret_cast<char*>(&clip),      sizeof(clip)))      return false;
+                if (!file.read(reinterpret_cast<char*>(&an.speed),  sizeof(an.speed)))  return false;
+                if (!file.read(reinterpret_cast<char*>(&flags),     sizeof(flags)))     return false;
+                an.clip = clip; an.loop = (flags & 1u) != 0; an.playing = (flags & 2u) != 0; an.time = 0.0f;
+                reg.emplace<AnimatorComponent>(e, an);
+            }
         }
         parentIdx.push_back(parentIndex);
     }

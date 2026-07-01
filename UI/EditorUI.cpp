@@ -312,6 +312,7 @@ namespace {
         if (auto* c = s.try_get<CharacterControllerComponent>(se)) d.emplace_or_replace<CharacterControllerComponent>(de, *c);
         if (auto* c = s.try_get<AudioSourceComponent>(se))   d.emplace_or_replace<AudioSourceComponent>(de, *c);
         if (auto* c = s.try_get<AudioListenerComponent>(se)) d.emplace_or_replace<AudioListenerComponent>(de, *c);
+        if (auto* c = s.try_get<AnimatorComponent>(se))      d.emplace_or_replace<AnimatorComponent>(de, *c);
     }
 
     // Write a (local) TRS matrix back into a TransformComponent, dropping any
@@ -1716,6 +1717,9 @@ void EditorUI::UpdatePlayMode() {
         reg.get<TransformComponent>(e).position = base->position + ax * off;
     }
 
+    for (auto [e, anim] : reg.view<AnimatorComponent>().each())
+        if (anim.playing) anim.time += dt * anim.speed;
+
     if (m_lua) m_lua->UpdateAll(m_scene, dt);   // script OnUpdate(dt)
     if (m_physics) m_physics->Step(m_scene, dt); // advance bodies, write transforms back
 }
@@ -2869,6 +2873,46 @@ void EditorUI::RenderInspector() {
             if (remove) { reg.remove<AudioListenerComponent>(selected); MarkDirty(); }
         }
 
+        if (auto* an = reg.try_get<AnimatorComponent>(selected)) {
+            ImGui::PushID("animator");
+            ImGui::Text("Animator");
+            ImGui::SameLine(ImGui::GetContentRegionMax().x - 22.0f);
+            bool remove = IconButton(ICON_FA_XMARK, "##rman", ImVec2(20.0f, 20.0f));
+            if (!remove) {
+                std::vector<std::string> clips;
+                const MeshComponent* mc = reg.try_get<MeshComponent>(selected);
+                if (mc && mc->kind == MeshKind::Model && m_sceneRenderer)
+                    clips = m_sceneRenderer->ModelAnimNames(mc->modelPath);
+
+                if (clips.empty()) {
+                    ImGui::TextDisabled("Model has no animation clips");
+                } else {
+                    if (an->clip < 0) an->clip = 0;
+                    if (an->clip >= (int)clips.size()) an->clip = (int)clips.size() - 1;
+                    ImGui::TextDisabled("Clip");
+                    ImGui::SetNextItemWidth(-1);
+                    if (ImGui::BeginCombo("##animclip", clips[an->clip].c_str())) {
+                        for (int i = 0; i < (int)clips.size(); ++i) {
+                            bool sel = (i == an->clip);
+                            if (ImGui::Selectable(clips[i].c_str(), sel)) { an->clip = i; an->time = 0.0f; MarkDirty(); }
+                            if (sel) ImGui::SetItemDefaultFocus();
+                        }
+                        ImGui::EndCombo();
+                    }
+                }
+                bool playing = an->playing;
+                if (ImGui::Checkbox("Playing", &playing)) { an->playing = playing; MarkDirty(); }
+                bool loop = an->loop;
+                if (ImGui::Checkbox("Loop", &loop)) { an->loop = loop; MarkDirty(); }
+                ImGui::TextDisabled("Speed");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::DragFloat("##animspd", &an->speed, 0.01f, 0.0f, 10.0f, "%.2f")) MarkDirty();
+            }
+            ImGui::Spacing();
+            ImGui::PopID();
+            if (remove) { reg.remove<AnimatorComponent>(selected); MarkDirty(); }
+        }
+
         if (ImGui::Button(ICON_FA_PLUS "  Add Component", ImVec2(-1, 0)))
             ImGui::OpenPopup("##addcomp");
         if (ImGui::BeginPopup("##addcomp")) {
@@ -2895,6 +2939,9 @@ void EditorUI::RenderInspector() {
             }
             if (!reg.all_of<AudioListenerComponent>(selected) && ImGui::MenuItem("Audio Listener")) {
                 reg.emplace<AudioListenerComponent>(selected); MarkDirty();
+            }
+            if (!reg.all_of<AnimatorComponent>(selected) && ImGui::MenuItem("Animator")) {
+                reg.emplace<AnimatorComponent>(selected); MarkDirty();
             }
             ImGui::EndPopup();
         }

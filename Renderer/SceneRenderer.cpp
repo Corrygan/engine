@@ -11,6 +11,8 @@
 #include "glad/gl.h"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_inverse.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <string>
 #include <vector>
 #include <cstdio>
@@ -48,6 +50,91 @@ void main() {
     vBitangent = nm * aBitangent;
     vUV        = aUV;
     gl_Position = uProjection * uView * worldPos;
+}
+)";
+
+    // Skinned variant: same outputs/uniforms as the lit vertex shader plus GPU
+    // skinning from a per-frame bone-matrix palette. Shares the fragment shader.
+    const char* kSkinnedVertexShaderSrc = R"(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+layout(location = 3) in vec3 aTangent;
+layout(location = 4) in vec3 aBitangent;
+layout(location = 5) in ivec4 aBoneIds;
+layout(location = 6) in vec4  aWeights;
+
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProjection;
+
+const int MAX_BONES = 256;
+uniform mat4 uBones[MAX_BONES];
+
+out vec3 vWorldPos;
+out vec3 vNormal;
+out vec2 vUV;
+out vec3 vTangent;
+out vec3 vBitangent;
+
+void main() {
+    float total = aWeights.x + aWeights.y + aWeights.z + aWeights.w;
+    mat4 skin;
+    if (total > 0.0001) {
+        ivec4 ids = clamp(aBoneIds, 0, MAX_BONES - 1);
+        skin  = aWeights.x * uBones[ids.x];
+        skin += aWeights.y * uBones[ids.y];
+        skin += aWeights.z * uBones[ids.z];
+        skin += aWeights.w * uBones[ids.w];
+    } else {
+        skin = mat4(1.0);
+    }
+    mat4 world = uModel * skin;
+    vec4 worldPos = world * vec4(aPos, 1.0);
+    vWorldPos  = worldPos.xyz;
+    mat3 nm    = mat3(transpose(inverse(world)));
+    vNormal    = nm * aNormal;
+    vTangent   = nm * aTangent;
+    vBitangent = nm * aBitangent;
+    vUV        = aUV;
+    gl_Position = uProjection * uView * worldPos;
+}
+)";
+
+    const char* kParticleVertSrc = R"(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec2 aUV;
+layout(location = 2) in vec4 aColor;
+uniform mat4 uView;
+uniform mat4 uProjection;
+out vec2 vUV;
+out vec4 vColor;
+void main() {
+    vUV = aUV;
+    vColor = aColor;
+    gl_Position = uProjection * uView * vec4(aPos, 1.0);
+}
+)";
+
+    const char* kParticleFragSrc = R"(
+#version 330 core
+in vec2 vUV;
+in vec4 vColor;
+out vec4 FragColor;
+uniform sampler2D uTex;
+uniform int uHasTex;
+void main() {
+    vec4 c = vColor;
+    if (uHasTex == 1) {
+        c *= texture(uTex, vUV);
+    } else {
+        float d = length(vUV - vec2(0.5)) * 2.0;   // soft round dot
+        c.a *= clamp(1.0 - d, 0.0, 1.0);
+    }
+    if (c.a <= 0.002) discard;
+    FragColor = c;
 }
 )";
 
@@ -646,6 +733,20 @@ SceneRenderer::SceneRenderer() {
 
     std::string fragSrc = std::string(kFragHeader) + kLightingGLSL + kFragMain;
     m_shader = new Shader(kVertexShaderSrc, fragSrc);
+    m_skinnedShader = new Shader(kSkinnedVertexShaderSrc, fragSrc);
+
+    m_particleShader = new Shader(kParticleVertSrc, kParticleFragSrc);
+    glGenVertexArrays(1, &m_particleVao);
+    glGenBuffers(1, &m_particleVbo);
+    glBindVertexArray(m_particleVao);
+    glBindBuffer(GL_ARRAY_BUFFER, m_particleVbo);
+    glEnableVertexAttribArray(0);   // pos
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(1);   // uv
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(2);   // color
+    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void*)(5 * sizeof(float)));
+    glBindVertexArray(0);
     m_lineShader = new Shader(kLineVertexShaderSrc, kLineFragmentShaderSrc);
     m_outlineShader = new Shader(kOutlineVertexShaderSrc, kOutlineFragmentShaderSrc);
     m_depthShader = new Shader(kDepthVertSrc, kDepthFragSrc);
@@ -780,6 +881,124 @@ SceneRenderer::~SceneRenderer() {
     delete m_ldrFB;
     delete m_hdrFB;
     delete m_framebuffer;
+}
+
+std::vector<std::string> SceneRenderer::ModelAnimNames(const std::string& emdlPath) {
+    std::vector<std::string> names;
+    ModelMesh* m = GetOrLoadModel(emdlPath);
+    if (m)
+        for (const AnimClip& c : m->Anims())
+            names.push_back(c.name.empty() ? std::string("clip") : c.name);
+    return names;
+}
+
+void SceneRenderer::UpdateAndRenderParticles(Scene& scene, const glm::mat4& view, const glm::mat4& projection) {
+    entt::registry& reg = scene.Reg();
+
+    double now = NowSeconds();
+    float dt = (m_lastParticleTime > 0.0) ? static_cast<float>(now - m_lastParticleTime) : 0.0f;
+    m_lastParticleTime = now;
+    if (dt < 0.0f)  dt = 0.0f;
+    if (dt > 0.1f)  dt = 0.1f;   // clamp hitches
+
+    static std::mt19937 rng(1337u);
+    auto rnd = [&](float a, float b) { std::uniform_real_distribution<float> d(a, b); return d(rng); };
+
+    // Drop pools whose emitter is gone.
+    for (auto it = m_particlePools.begin(); it != m_particlePools.end();) {
+        if (!reg.valid(it->first) || !reg.all_of<ParticleEmitterComponent>(it->first))
+            it = m_particlePools.erase(it);
+        else ++it;
+    }
+
+    // Simulate + emit.
+    for (auto [e, em] : reg.view<ParticleEmitterComponent>().each()) {
+        ParticlePool& pool = m_particlePools[e];
+        glm::vec3 origin = glm::vec3(WorldMatrixOf(reg, e)[3]);
+
+        for (size_t i = 0; i < pool.particles.size();) {
+            Particle& p = pool.particles[i];
+            p.life -= dt;
+            if (p.life <= 0.0f) { pool.particles[i] = pool.particles.back(); pool.particles.pop_back(); continue; }
+            p.vel += em.gravity * dt;
+            p.pos += p.vel * dt;
+            ++i;
+        }
+
+        int cap = em.maxParticles > 0 ? em.maxParticles : 0;
+        if (em.emitting) pool.emitAccum += em.rate * dt;
+        if (pool.emitAccum > 10000.0f) pool.emitAccum = 0.0f;   // safety
+        while (em.emitting && pool.emitAccum >= 1.0f && static_cast<int>(pool.particles.size()) < cap) {
+            pool.emitAccum -= 1.0f;
+            glm::vec3 base = (glm::length(em.direction) > 1e-5f) ? glm::normalize(em.direction) : glm::vec3(0, 1, 0);
+            glm::vec3 dir  = glm::normalize(base + glm::vec3(rnd(-1, 1), rnd(-1, 1), rnd(-1, 1)) * em.spread);
+            Particle p;
+            p.pos     = origin;
+            p.vel     = dir * em.speed;
+            p.maxLife = std::max(0.05f, em.lifetime * (1.0f + rnd(-em.lifetimeVar, em.lifetimeVar)));
+            p.life    = p.maxLife;
+            p.size0   = em.startSize;  p.size1 = em.endSize;
+            p.col0    = em.startColor; p.col1  = em.endColor;
+            pool.particles.push_back(p);
+        }
+    }
+
+    bool any = false;
+    for (auto& kv : m_particlePools) if (!kv.second.particles.empty()) { any = true; break; }
+    if (!any) return;
+
+    // Billboard basis from the view rotation rows.
+    glm::vec3 camRight(view[0][0], view[1][0], view[2][0]);
+    glm::vec3 camUp   (view[0][1], view[1][1], view[2][1]);
+
+    m_particleShader->Bind();
+    m_particleShader->SetMat4("uView", view);
+    m_particleShader->SetMat4("uProjection", projection);
+    glEnable(GL_BLEND);
+    glDepthMask(GL_FALSE);   // test against scene depth, don't write
+
+    glBindVertexArray(m_particleVao);
+    std::vector<float> verts;
+    for (auto [e, em] : reg.view<ParticleEmitterComponent>().each()) {
+        auto pit = m_particlePools.find(e);
+        if (pit == m_particlePools.end() || pit->second.particles.empty()) continue;
+        const ParticlePool& pool = pit->second;
+
+        if (em.blend == ParticleBlend::Additive) glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+        else                                     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+        int hasTex = 0;
+        if (!em.texture.empty()) {
+            Texture* t = TextureManager::GetOrLoad(em.texture);
+            if (t) { t->Bind(0); m_particleShader->SetInt("uTex", 0); hasTex = 1; }
+        }
+        m_particleShader->SetInt("uHasTex", hasTex);
+        if (!hasTex) { glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, 0); }
+
+        verts.clear();
+        verts.reserve(pool.particles.size() * 6 * 9);
+        for (const Particle& p : pool.particles) {
+            float t    = (p.maxLife > 0.0f) ? 1.0f - p.life / p.maxLife : 1.0f;
+            float half = glm::mix(p.size0, p.size1, t) * 0.5f;
+            glm::vec4 col = glm::mix(p.col0, p.col1, t);
+            glm::vec3 r = camRight * half, u = camUp * half, c = p.pos;
+            glm::vec3 bl = c - r - u, br = c + r - u, tr = c + r + u, tl = c - r + u;
+            auto push = [&](const glm::vec3& q, float uu, float vv) {
+                verts.insert(verts.end(), { q.x, q.y, q.z, uu, vv, col.r, col.g, col.b, col.a });
+            };
+            push(bl, 0, 0); push(br, 1, 0); push(tr, 1, 1);
+            push(bl, 0, 0); push(tr, 1, 1); push(tl, 0, 1);
+        }
+        glBindBuffer(GL_ARRAY_BUFFER, m_particleVbo);
+        glBufferData(GL_ARRAY_BUFFER,
+            static_cast<GLsizeiptr>(verts.size() * sizeof(float)), verts.data(), GL_DYNAMIC_DRAW);
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(pool.particles.size() * 6));
+    }
+    glBindVertexArray(0);
+
+    glDepthMask(GL_TRUE);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);   // restore default blend
+    m_particleShader->Unbind();
 }
 
 ModelMesh* SceneRenderer::GetOrLoadModel(const std::string& emdlPath) {
@@ -1087,6 +1306,76 @@ void SceneRenderer::RenderSSR(const glm::mat4& projection) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+namespace {
+    glm::vec3 SampleVec3(const std::vector<std::pair<float, glm::vec3>>& keys, float t, const glm::vec3& fallback) {
+        if (keys.empty()) return fallback;
+        if (keys.size() == 1 || t <= keys.front().first) return keys.front().second;
+        if (t >= keys.back().first) return keys.back().second;
+        for (size_t i = 0; i + 1 < keys.size(); ++i)
+            if (t < keys[i + 1].first) {
+                float span = keys[i + 1].first - keys[i].first;
+                float f = span > 0.0f ? (t - keys[i].first) / span : 0.0f;
+                return glm::mix(keys[i].second, keys[i + 1].second, f);
+            }
+        return keys.back().second;
+    }
+    glm::quat SampleQuat(const std::vector<std::pair<float, glm::quat>>& keys, float t) {
+        if (keys.empty()) return glm::quat(1, 0, 0, 0);
+        if (keys.size() == 1 || t <= keys.front().first) return keys.front().second;
+        if (t >= keys.back().first) return keys.back().second;
+        for (size_t i = 0; i + 1 < keys.size(); ++i)
+            if (t < keys[i + 1].first) {
+                float span = keys[i + 1].first - keys[i].first;
+                float f = span > 0.0f ? (t - keys[i].first) / span : 0.0f;
+                return glm::normalize(glm::slerp(keys[i].second, keys[i + 1].second, f));
+            }
+        return keys.back().second;
+    }
+
+    // Sample a clip at `seconds` and produce the per-bone skinning palette.
+    void SampleAnimation(const ModelMesh& mesh, int clipIdx, float seconds, bool loop,
+                         std::vector<glm::mat4>& out) {
+        const std::vector<ModelBone>& bones = mesh.Bones();
+        const AnimClip& clip = mesh.Anims()[clipIdx];
+        float tps   = clip.tps > 0.0f ? clip.tps : 25.0f;
+        float dur   = clip.duration > 0.0f ? clip.duration : 1.0f;
+        float ticks = seconds * tps;
+        float t = loop ? std::fmod(ticks, dur) : std::min(ticks, dur);
+        if (t < 0.0f) t = 0.0f;
+
+        std::vector<glm::mat4> localT(bones.size());
+        for (size_t i = 0; i < bones.size(); ++i) localT[i] = bones[i].localBind;
+        for (const AnimChannel& ch : clip.channels) {
+            if (ch.bone < 0 || ch.bone >= static_cast<int>(bones.size())) continue;
+            glm::vec3 p = SampleVec3(ch.pos, t, glm::vec3(bones[ch.bone].localBind[3]));
+            glm::quat r = SampleQuat(ch.rot, t);
+            glm::vec3 s = SampleVec3(ch.scl, t, glm::vec3(1.0f));
+            localT[ch.bone] = glm::translate(glm::mat4(1.0f), p) * glm::mat4_cast(r) * glm::scale(glm::mat4(1.0f), s);
+        }
+
+        std::vector<glm::mat4> global(bones.size());
+        out.resize(bones.size());
+        for (size_t i = 0; i < bones.size(); ++i) {
+            global[i] = (bones[i].parent < 0) ? localT[i] : global[bones[i].parent] * localT[i];
+            out[i] = mesh.GlobalInverse() * global[i] * bones[i].offset;
+        }
+    }
+
+    std::vector<glm::mat4> g_boneScratch;   // reused each call; consumed immediately
+
+    // The bone-matrix palette for a skinned mesh: the entity's animated pose if it
+    // has an Animator (with a valid clip), otherwise the rest/bind pose.
+    const std::vector<glm::mat4>& BoneMatricesFor(entt::registry& reg, entt::entity e, ModelMesh* mesh) {
+        const AnimatorComponent* anim = reg.try_get<AnimatorComponent>(e);
+        if (anim && !mesh->Anims().empty() && anim->clip >= 0 &&
+            anim->clip < static_cast<int>(mesh->Anims().size())) {
+            SampleAnimation(*mesh, anim->clip, anim->time, anim->loop, g_boneScratch);
+            return g_boneScratch;
+        }
+        return mesh->BindPose();
+    }
+}
+
 uint32_t SceneRenderer::Render(Scene& scene, entt::entity selected,
     int width, int height,
     const glm::mat4& view, const glm::mat4& projection) {
@@ -1222,28 +1511,35 @@ uint32_t SceneRenderer::Render(Scene& scene, entt::entity selected,
     }
     glm::vec2 screenSize((float)width, (float)height);
 
+    // Frame-constant uniforms, applied to both the lit shader and its skinned
+    // variant (each is bound per-mesh in the loop below).
+    auto setupLit = [&](Shader* s) {
+        s->Bind();
+        s->SetMat4("uView",       view);
+        s->SetMat4("uProjection", projection);
+        s->SetVec3("uCamPos",     camPos);
+        s->SetInt("uAlbedoTex",     0);
+        s->SetInt("uNormalTex",     1);
+        s->SetInt("uMetalRoughTex", 2);
+        s->SetInt("uShadowMap",     kShadowUnit);
+        s->SetInt("uShadowLight",   shadowLight);
+        s->SetMat4("uLightSpace",   m_lightSpace);
+        s->SetInt  ("uPointShadow",      kPointUnit);
+        s->SetInt  ("uPointShadowLight", pointShadow);
+        s->SetVec3 ("uPointLightPos",    pointPos);
+        s->SetFloat("uPointFar",         pointFar);
+        s->SetInt  ("uIrradiance", kIrrUnit);
+        s->SetInt  ("uPrefilter",  kPrefUnit);
+        s->SetInt  ("uBrdfLUT",    kBrdfUnit);
+        s->SetInt  ("uHasIBL",     hasIBL);
+        s->SetInt  ("uSSAO",        kSSAOUnit);
+        s->SetInt  ("uSSAOEnabled", hasSSAO);
+        s->SetVec2 ("uScreenSize",  screenSize);
+        ApplyLights(s, lights);
+    };
+    setupLit(m_shader);
+    setupLit(m_skinnedShader);
     m_shader->Bind();
-    m_shader->SetMat4("uView",       view);
-    m_shader->SetMat4("uProjection", projection);
-    m_shader->SetVec3("uCamPos",     camPos);
-    m_shader->SetInt("uAlbedoTex",     0);
-    m_shader->SetInt("uNormalTex",     1);
-    m_shader->SetInt("uMetalRoughTex", 2);
-    m_shader->SetInt("uShadowMap",     kShadowUnit);
-    m_shader->SetInt("uShadowLight",   shadowLight);
-    m_shader->SetMat4("uLightSpace",   m_lightSpace);
-    m_shader->SetInt  ("uPointShadow",      kPointUnit);
-    m_shader->SetInt  ("uPointShadowLight", pointShadow);
-    m_shader->SetVec3 ("uPointLightPos",    pointPos);
-    m_shader->SetFloat("uPointFar",         pointFar);
-    m_shader->SetInt  ("uIrradiance", kIrrUnit);
-    m_shader->SetInt  ("uPrefilter",  kPrefUnit);
-    m_shader->SetInt  ("uBrdfLUT",    kBrdfUnit);
-    m_shader->SetInt  ("uHasIBL",     hasIBL);
-    m_shader->SetInt  ("uSSAO",        kSSAOUnit);
-    m_shader->SetInt  ("uSSAOEnabled", hasSSAO);
-    m_shader->SetVec2 ("uScreenSize",  screenSize);
-    ApplyLights(m_shader, lights);
 
     auto renderView = reg.view<TransformComponent, MeshComponent>();
     for (auto e : renderView) {
@@ -1350,15 +1646,18 @@ uint32_t SceneRenderer::Render(Scene& scene, entt::entity selected,
             m_shader->SetMat4("uProjection", projection);
             m_shader->SetVec3("uCamPos",     camPos);
         } else {
-            // ── Default PBR shader ────────────────────────────────────────
-            m_shader->SetVec3 ("uColor",            color);
-            m_shader->SetFloat("uMetallic",          metallic);
-            m_shader->SetFloat("uRoughness",         roughness);
-            m_shader->SetVec3 ("uEmissive",          emissive);
-            m_shader->SetInt  ("uHasAlbedoTex",      albedoTex ? 1 : 0);
-            m_shader->SetInt  ("uHasNormalTex",       normalTex ? 1 : 0);
-            m_shader->SetInt  ("uHasMetalRoughTex",  mrTex     ? 1 : 0);
-            m_shader->SetInt  ("uHasTangents",        hasTangents ? 1 : 0);
+            // ── Default PBR shader (skinned variant for rigged models) ────
+            const bool skinned = modelMesh && modelMesh->IsSkinned();
+            Shader* sh = skinned ? m_skinnedShader : m_shader;
+            sh->Bind();
+            sh->SetVec3 ("uColor",            color);
+            sh->SetFloat("uMetallic",          metallic);
+            sh->SetFloat("uRoughness",         roughness);
+            sh->SetVec3 ("uEmissive",          emissive);
+            sh->SetInt  ("uHasAlbedoTex",      albedoTex ? 1 : 0);
+            sh->SetInt  ("uHasNormalTex",       normalTex ? 1 : 0);
+            sh->SetInt  ("uHasMetalRoughTex",  mrTex     ? 1 : 0);
+            sh->SetInt  ("uHasTangents",        hasTangents ? 1 : 0);
 
             if (albedoTex) albedoTex->Bind(0);
             else { glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, 0); }
@@ -1367,7 +1666,13 @@ uint32_t SceneRenderer::Render(Scene& scene, entt::entity selected,
             if (mrTex) mrTex->Bind(2);
             else { glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, 0); }
 
-            m_shader->SetMat4("uModel", model);
+            sh->SetMat4("uModel", model);
+
+            if (skinned) {
+                const std::vector<glm::mat4>& pose = BoneMatricesFor(reg, e, modelMesh);
+                int n = std::min(static_cast<int>(pose.size()), 256);
+                if (n > 0) sh->SetMat4Array("uBones", pose.data(), n);
+            }
 
             if (modelMesh) modelMesh->Draw();
             else           primMesh->Draw();
@@ -1413,6 +1718,10 @@ uint32_t SceneRenderer::Render(Scene& scene, entt::entity selected,
     }
 
     glDisable(GL_STENCIL_TEST);
+
+    // Transparent particles over the lit scene (still in the HDR buffer).
+    UpdateAndRenderParticles(scene, view, projection);
+
     m_hdrFB->Unbind();
 
     // ── SSR: reflections from the G-buffer + lit HDR color ──────────────

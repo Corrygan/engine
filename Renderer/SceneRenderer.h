@@ -20,6 +20,21 @@ struct NodeShaderEntry {
     std::vector<std::pair<std::string, std::string>> texBindings;
 };
 
+// One live particle (CPU simulated, world space).
+struct Particle {
+    glm::vec3 pos{ 0.0f };
+    glm::vec3 vel{ 0.0f };
+    float     life    = 0.0f;   // remaining seconds
+    float     maxLife = 1.0f;
+    float     size0 = 0.2f, size1 = 0.0f;
+    glm::vec4 col0{ 1.0f }, col1{ 1.0f };
+};
+
+struct ParticlePool {
+    std::vector<Particle> particles;
+    float emitAccum = 0.0f;     // fractional particles pending emission
+};
+
 class SceneRenderer {
 public:
     enum class AAMode { None, FXAA };   // expandable: SMAA, SSAA, TAA, ...
@@ -41,6 +56,10 @@ public:
 
     // Save the last rendered viewport image to a 24-bit BMP. Returns success.
     bool SaveScreenshot(const std::string& path);
+
+    // Animation clip names of a model (empty if static / not found). For the
+    // Animator inspector dropdown.
+    std::vector<std::string> ModelAnimNames(const std::string& emdlPath);
 
     // Post-processing
     void  SetExposure(float e) { m_exposure = e; }
@@ -75,6 +94,7 @@ public:
 private:
     PrimitiveMesh* GetMeshForKind(MeshKind kind) const;
     ModelMesh*     GetOrLoadModel(const std::string& emdlPath);
+    void UpdateAndRenderParticles(Scene& scene, const glm::mat4& view, const glm::mat4& projection);
     void           RenderShadowPass(Scene& scene);
     void           RenderPointShadowPass(Scene& scene,
                                          const glm::vec3& lightPos, float farPlane);
@@ -90,6 +110,12 @@ private:
     Framebuffer* m_hdrFB       = nullptr;   // HDR scene buffer (RGBA16F)
     Framebuffer* m_ldrFB       = nullptr;   // tonemapped LDR, input to FXAA
     Shader* m_shader = nullptr;
+    Shader* m_skinnedShader = nullptr;      // GPU skinning variant of m_shader
+    Shader* m_particleShader = nullptr;     // billboarded particles
+    std::unordered_map<entt::entity, ParticlePool> m_particlePools;
+    uint32_t m_particleVao = 0;
+    uint32_t m_particleVbo = 0;
+    double   m_lastParticleTime = 0.0;
     Shader* m_lineShader = nullptr;
     Shader* m_outlineShader = nullptr;
     Shader* m_depthShader = nullptr;

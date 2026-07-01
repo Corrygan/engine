@@ -3,6 +3,9 @@
 Engine/
 Assets/Materials
 Assets/Scripts
+Assets/Sounds
+Assets/Music
+Assets/Voice
 out/
 x64/
 Engine.slnx

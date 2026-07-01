@@ -56,6 +56,12 @@ void Shader::SetMat4(const std::string& name, const glm::mat4& matrix) const {
     glUniformMatrix4fv(loc, 1, GL_FALSE, &matrix[0][0]);
 }
 
+void Shader::SetMat4Array(const std::string& name, const glm::mat4* mats, int count) const {
+    if (count <= 0) return;
+    int loc = glGetUniformLocation(m_programID, name.c_str());
+    glUniformMatrix4fv(loc, count, GL_FALSE, &mats[0][0][0]);
+}
+
 void Shader::SetVec2(const std::string& name, const glm::vec2& v) const {
     int loc = glGetUniformLocation(m_programID, name.c_str());
     glUniform2f(loc, v.x, v.y);
